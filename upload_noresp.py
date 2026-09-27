@@ -47,7 +47,7 @@ async def find_device():
 
 async def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--image", "-i", default="test_pattern_red_400x300.png")
+    ap.add_argument("--image", "-i", default="gfx/progromirovay.png")
     ap.add_argument("--device", "-d", default=None)
     ap.add_argument("--settle", type=float, default=0.005,
                     help="seconds between packets")

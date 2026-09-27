@@ -134,7 +134,7 @@ async def discover_eink_device() -> str:
 
 async def main():
     parser = argparse.ArgumentParser(description="DA14585 E-Ink BLE Image Transmitter")
-    parser.add_argument("--image", "-i", default="test_pattern_red_400x300.png", help="Path to input image (PNG/JPG)")
+    parser.add_argument("--image", "-i", default="gfx/progromirovay.png", help="Path to input image (PNG/JPG)")
     parser.add_argument("--device", "-d", default=None, help="Device BLE MAC address (auto-scans if omitted)")
     args = parser.parse_args()
 

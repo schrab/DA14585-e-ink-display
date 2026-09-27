@@ -295,6 +295,8 @@ sudo rfkill unblock bluetooth
 ├── reboot_target.py               # Software reset (recovers from HardFault / NMI halt)
 ├── display_image.py               # Universal image processing pipeline
 ├── test_pattern_red_400x300.png   # 400x300 tri-color test graphic
+├── gfx/progromirovay.png          # Default test image (--image in all three clients)
+├── gfx/progromirovay_preview.png  # 400x300 reconstruction from the wire planes
 ├── HANDOFF.md                     # This developer handoff guide
 ├── AGENTS.md                      # Complete reverse-engineering technical guide
 ├── README.md                      # Project overview and documentation
