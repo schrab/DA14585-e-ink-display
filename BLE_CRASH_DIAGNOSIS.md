@@ -268,6 +268,88 @@ The framebuffer was read back over SWD after disconnecting and compared byte-for
 against the host-side conversion. This is the first run in the project with a **provably
 complete** upload.
 
+### Static analysis of the faulting code (2026-09-28)
+
+The mask ROM is fully readable over SWD. The entire 128 KB dumps cleanly (96.1% non-`0xFF`)
+and `da14585_586.lib` supplies **1308 ROM symbol names**, so this is now a tractable static
+problem rather than guesswork.
+
+**The KE message module is tiny and contiguous:**
+
+| symbol | address |
+|---|---|
+| `ke_msg_alloc` | `0x07F1BBB0` |
+| `ke_msg_send` | `0x07F1BBE2` |
+| `ke_msg_free` | `0x07F1BC36` |
+| `ke_queue_insert` (fault site) | `0x07F1BCAD` |
+| `ke_task_init_func` | `0x07F1BE3F` |
+
+`ke_msg_alloc` confirms the header layout and rules out one theory:
+
+```asm
+07f1bbbe:  adds  r0, #12          ; param_len + sizeof(header)
+07f1bbc0:  bl    0x07F1B994       ; ke_mem_alloc()
+07f1bbc4:  movs  r1, #0
+07f1bbc6:  mvns  r1, r1           ; 0xFFFFFFFF
+07f1bbc8:  str   r1, [r0, #0]     ; msg->next = NOT_IN_QUEUE  <-- no NULL check
+07f1bbca:  strh  r7, [r0, #4]     ; id
+07f1bbcc:  strh  r6, [r0, #6]     ; dest_id
+07f1bbce:  strh  r5, [r0, #8]     ; src_id
+07f1bdd2:  strh  r4, [r0, #10]    ; param_len
+```
+
+There is no NULL check after `ke_mem_alloc`, but a failed allocation would fault writing to
+address **0x0**, not `0x50001500` — so the NULL path is **not** our bug. The single global
+referenced by `ke_msg_send` is `ke_env` at `0x07FD7E78`.
+
+**`ke_env` is decoded.** `KE_MEM_BLOCK_MAX = 4`, `heap[]` at `ke_env + 0x3C`:
+
+| slot | pointer | region | payload |
+|---|---|---|---|
+| `heap[0]` | `0x07FD4D84` | env heap | 444 B free |
+| `heap[1]` | `0x07FD4FF8` | db heap | 200 B free |
+| `heap[2]` | `0x07FD5404` | **msg heap** (`MSG_HEAP_SZ`) | 1784 B free |
+| `heap[3]` | `0x07FCECBC` | non-retained heap | 1024 B free |
+
+Free-block header, derived from a live walk:
+
+```c
+struct mblock_free {
+    uint16_t      magic;   // +0, always 0xA55A
+    uint16_t      size;    // +2
+    struct mblock_free *next;  // +4, 0 terminates the list
+};
+```
+
+**The key correction this produces.** The `0x0048A55A` seen next to the faulting message is
+a *valid* free-block header, not evidence of a doubly-freed block. The message the ROM
+dispatched therefore was **not a corrupted message** — it was a pointer into a region the
+allocator considers **free**. In other words some caller passed `ke_msg_send()` a `param`
+pointer that `ke_msg_alloc` never returned. That is a sharper and more testable statement
+than "the free list got corrupted", and it redirects the search towards the *callers* of
+`ke_msg_send` rather than the allocator.
+
+**Why the periodic free-list validator was abandoned.** All four free lists walk correctly
+and are pristine whenever the device is idle, and the corruption is transient — it exists
+for microseconds and is consumed by the very dispatch that faults. A validator can only run
+at a safe point in task context, i.e. *after* the damage, by which time the ROM has already
+branched into the register map. It would report "healthy" every time and give false
+confidence. This is an architectural limit of Cortex-M0 (no DWT watchpoints, no ETM/ITM),
+not a probe limitation.
+
+**Hardware patch controller: unused.** The DA14585 does implement `PATCH_ADDR0..21_REG` at
+`0x40080020 + 8n` (reset value `0x07F00000`), which redirects instruction fetches from ROM
+to RAM. All 22 registers read their **reset value** — zero active patches. The Dialog
+"patching" is a link-time/boot-time software mechanism, not this hardware, so the whole
+hardware-hook theory is dead. (Note `0x50004000` is `SRC1_CTRL_REG`, an audio register —
+not a patch controller.)
+
+**Not yet done:** the 128 KB dump exists but has not been loaded into Ghidra. That is the
+remaining step, and it is now well targeted — we know the exact 0x290-byte module, the
+exact faulting instruction, the exact free-block layout, and that the crash is in the
+*callers* of `ke_msg_send` rather than the allocator.
+
+
 ---
 
 ## 3. Linux environment notes

@@ -32,3 +32,5 @@ test_hdr*.bin
 test_code*.bin
 test_ph*.bin
 test_img2_*.bin
+ke_rom_128k.bin
+ke_rom_symbols.csv
