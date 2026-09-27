@@ -32,6 +32,7 @@
 #include "ke_msg.h"
 #include "custs1_task.h"
 #include "user_eink_app.h"
+#include "user_eink_diag.h"
 #include "user_custs1_def.h"
 #include "user_periph_setup.h"
 #include "gpio.h"
@@ -69,6 +70,9 @@ void user_app_init(void)
 
     // Default SDK handler sets device role, address, etc.
     default_app_on_init();
+
+    // Baseline snapshot: whatever the SDK initialisation legitimately touched.
+    diag_snapshot(DIAG_PHASE_BOOT);
 }
 
 /* ─── Advertising ────────────────────────────────────────────────────────── */
@@ -102,6 +106,11 @@ void user_app_connection(uint8_t connection_idx,
 
 void user_app_disconnect(struct gapc_disconnect_ind const *param)
 {
+    // A disconnect is the known trigger for the refresh HardFault, so capture the
+    // RAM state at the exact moment the link drops.
+    diag_snapshot(DIAG_PHASE_DISCONNECT);
+    diag_set_count(eink_rx_bytes);
+
     // LED: OFF when disconnected
     GPIO_SetActive(STATUS_LED_PORT, STATUS_LED_PIN);
 
@@ -118,10 +127,18 @@ static void user_eink_refresh_timer_cb(void)
     // LED ON during refresh
     GPIO_SetInactive(STATUS_LED_PORT, STATUS_LED_PIN);
 
+    // Bracket the blocking cycle: anything the ROM stack or our own bit-banged SPI
+    // writes into the wrong region shows up as a CRC delta between these two.
+    diag_snapshot(DIAG_PHASE_PRE_REFRESH);
+    diag_set_count(eink_rx_bytes);
+
     // Initialise display and execute physical 3-color refresh cycle (~17s)
     epd_init();
     epd_display_refresh_tricolor(eink_framebuffer,
                                  eink_framebuffer + 15000);
+
+    diag_snapshot(DIAG_PHASE_POST_REFRESH);
+    diag_set_count(eink_rx_bytes);
 
     // LED OFF after refresh completes
     GPIO_SetActive(STATUS_LED_PORT, STATUS_LED_PIN);
@@ -145,6 +162,8 @@ void user_eink_cmd_wr_handler(ke_msg_id_t const msgid,
 
     case 0x06:
         // Schedule refresh to run in 100ms via SDK easy timer so GATT write response is sent first
+        diag_snapshot(DIAG_PHASE_CMD_REFRESH);
+        diag_set_count(eink_rx_bytes);
         app_easy_timer(10, user_eink_refresh_timer_cb);
         break;
 
@@ -155,6 +174,8 @@ void user_eink_cmd_wr_handler(ke_msg_id_t const msgid,
             eink_framebuffer[i + 15000] = 0x00; // Red plane: non-red
         }
         eink_rx_bytes = 0;
+        diag_snapshot(DIAG_PHASE_CMD_CLEAR);
+        diag_set_count(eink_rx_bytes);
         break;
 
     case 0x08:
@@ -177,6 +198,12 @@ void user_eink_cmd_wr_handler(ke_msg_id_t const msgid,
             memcpy(ntf_req->value, rsp, sizeof(rsp));
             ke_msg_send(ntf_req);
         }
+        break;
+
+    case 0x09:
+        // On-demand CRC snapshot, for bisecting the corruption over SWD.
+        diag_snapshot(DIAG_PHASE_MANUAL);
+        diag_set_count(eink_rx_bytes);
         break;
 
     default:
@@ -224,11 +251,28 @@ void user_catch_rest_hndl(ke_msg_id_t const msgid,
         const struct custs1_val_write_ind *wr =
             (const struct custs1_val_write_ind *)param;
 
+        // Tight bracket around the write: the ROM ATT response path runs between
+        // POST_WRITE and the next application entry point, and that is where the
+        // firmware hardfaults, so a delta here localises the corrupting write.
+        diag_snapshot(DIAG_PHASE_PRE_WRITE);
+        diag_set_count(wr->length);
+
+        diag_observe((uint16_t)msgid, (uint16_t)dest_id, (uint16_t)src_id,
+                     wr->handle, wr->length,
+                     (wr->length > 0) ? wr->value[0] : 0xFF);
+
         if (wr->handle == EINK_CMD_VAL) {
+            diag_route(1);
             user_eink_cmd_wr_handler(msgid, wr, dest_id, src_id);
         } else if (wr->handle == EINK_DATA_VAL) {
+            diag_route(2);
             user_eink_data_wr_handler(msgid, wr, dest_id, src_id);
+        } else {
+            diag_route(3);
         }
+
+        diag_snapshot(DIAG_PHASE_POST_WRITE);
+        diag_set_count(wr->length);
         break;
     }
 

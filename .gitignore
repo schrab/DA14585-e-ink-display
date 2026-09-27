@@ -19,6 +19,9 @@ ehthumbs.db
 Desktop.ini
 .DS_Store
 
+# Python virtual environment
+venv/
+
 # Build artifacts
 firmware/build/
 *.elf

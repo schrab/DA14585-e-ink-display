@@ -2,6 +2,11 @@
 
 This document is the complete guide for continuing development, compilation, flashing, and wireless BLE image streaming on a **Linux machine** with a fresh environment and the original **Renesas / Dialog DA145xx SDK (v6.0.24.1464 or v6.0.22.1401)**.
 
+> **Read [`BLE_CRASH_DIAGNOSIS.md`](BLE_CRASH_DIAGNOSIS.md) before changing the build, the
+> KE heap sizes, or the BLE transport.** It documents a fixed KE-message-heap starvation
+> bug, an *open* HardFault on any ATT Write Request, and the environment gotchas listed
+> in §3 below.
+
 ---
 
 ## 1. System & Hardware Summary
@@ -123,9 +128,19 @@ cd firmware
 make SDK_PATH=~/DA145xx_SDK/6.0.24.1464 all
 ```
 
+### ⚠️ Build gotchas
+* **`make flash` calls bare `python3`, which has no `pyocd`.** Use
+  `make SDK_PATH=~/DA145xx_SDK/6.0.24.1464 PYTHON=../venv/bin/python flash`.
+* **There is no header dependency tracking.** After editing `user_config.h` or any
+  `-include`d config header, run `make clean` or your change will be silently ignored.
+* The prebuilt Keil `da14585_586.lib` produces `Forcing branch to absolute symbol in
+  Thumb mode` warnings. These are expected and harmless.
+* `MSG_HEAP_SZ` in `user_config.h` is load-bearing — see
+  [`BLE_CRASH_DIAGNOSIS.md`](BLE_CRASH_DIAGNOSIS.md) §1 before changing it.
+
 ### Build Output:
 * `build/eink_ble_firmware.elf`: Linked ELF with complete symbol and debug table.
-* `build/eink_ble_firmware.bin`: Raw ARM Cortex-M0 binary (~29.8 KB).
+* `build/eink_ble_firmware.bin`: Raw ARM Cortex-M0 binary (~30 KB).
 * `build/eink_ble_firmware.img`: Packaged binary with 64-byte Dialog Image Header (`s_imageHeader`, imageid=3, CRC-32).
 
 ---
@@ -154,6 +169,22 @@ The flasher automatically:
 
 ## 7. Wireless BLE Image Uploading (Linux Client)
 
+### ⚠️ Use Write Without Response, not Write With Response
+
+An ATT **Write Request** (`response=True`) currently **hardfaults the firmware** inside the
+ROM's `ke_queue_insert`. A **Write Command** (`response=False`) works. Use
+[`upload_noresp.py`](upload_noresp.py), which also paces the stream:
+
+```bash
+./venv/bin/python upload_noresp.py --image test_pattern_red_400x300.png
+```
+
+Because Write Commands have no link-layer retransmission, the host can outrun the
+peripheral and the tail of the image is silently dropped (~160 bytes at 14.4 KB/s). The
+image protocol is idempotent — every packet is a `memcpy` at an explicit offset — so
+re-sending the tail, or polling command `0x08` until `eink_rx_bytes` reads 30000, closes
+that gap. See [`BLE_CRASH_DIAGNOSIS.md`](BLE_CRASH_DIAGNOSIS.md) §2.
+
 ### Ensure Bluetooth is Active
 ```bash
 sudo systemctl start bluetooth
@@ -163,10 +194,10 @@ sudo rfkill unblock bluetooth
 ### Run the Client
 ```bash
 # Automatically scan, connect, stream 30,000 bytes, and trigger e-ink refresh:
-python3 ble_eink_client.py --image test_pattern_red_400x300.png
+./venv/bin/python ble_eink_client.py --image test_pattern_red_400x300.png
 
 # Or specify MAC address directly if known:
-python3 ble_eink_client.py --image test_pattern_red_400x300.png --device 18:BC:5A:7D:26:0D
+./venv/bin/python ble_eink_client.py --image test_pattern_red_400x300.png --device 18:BC:5A:7D:26:0D
 ```
 
 ### What Happens:
@@ -178,6 +209,10 @@ python3 ble_eink_client.py --image test_pattern_red_400x300.png --device 18:BC:5
 6. The SSD1619 controller drives physical electrophoretic pigment migration for ~17 seconds.
 7. The status LED turns ON during refresh and OFF upon completion.
 8. Upon refresh completion, the display retains the image permanently with zero power draw!
+
+> Steps 2–4 use Write With Response and are affected by the open bug above. Treat the
+> throughput and "acknowledged" messages from `ble_eink_client.py` as unreliable until
+> it is fixed.
 
 ---
 
@@ -206,10 +241,16 @@ python3 ble_eink_client.py --image test_pattern_red_400x300.png --device 18:BC:5
 ## 9. File Tree of Key Components
 
 ```text
+├── BLE_CRASH_DIAGNOSIS.md         # Memory-budget + HardFault findings (READ FIRST)
 ├── ble_eink_client.py             # Python Bleak wireless image upload client
+├── upload_noresp.py               # Working uploader (Write Without Response)
+├── repro_disconnect.py            # Deterministic mid-refresh crash reproducer
+├── diag_crc.py                    # Retained RAM-CRC snapshot differ (SWD)
+├── regen_diag_regions.py          # Regenerate diag region table from the linker map
 ├── flash_spi_firmware.py          # Standalone ST-Link V2 SPI flash programmer
 ├── ssd1619.h / ssd1619.c          # Bare-metal C driver for SSD1619 / SSD1683
 ├── check_target_now.py            # SWD core status, register, and GPIO inspector
+├── reboot_target.py               # Software reset (recovers from HardFault / NMI halt)
 ├── display_image.py               # Universal image processing pipeline
 ├── test_pattern_red_400x300.png   # 400x300 tri-color test graphic
 ├── HANDOFF.md                     # This developer handoff guide
@@ -223,10 +264,11 @@ python3 ble_eink_client.py --image test_pattern_red_400x300.png --device 18:BC:5
     │   └── user_periph_setup.c/h  # GPIO pad configuration & pin reservations
     └── ble/
         ├── user_eink_app.c/h      # BLE application callbacks, GATT handlers, timers
+        ├── user_eink_diag.c/h     # Optional (EINK_DIAG=1) RAM-CRC diagnostics
         ├── user_custs1_def.c/h    # Reverse-engineered 128-bit GATT service & characteristics
         ├── user_custs_config.c/h  # CUSTS1 profile structure registration
         └── config/
-            ├── user_config.h      # Device name, BD address, advertising config
+            ├── user_config.h      # Device name, BD address, MSG_HEAP_SZ, advertising config
             ├── user_callback_config.h # SDK callback registration
             ├── user_modules_config.h  # SDK module inclusions
             ├── user_profiles_config.h # Enabled GATT profiles (DIS, CUSTS1)

@@ -131,4 +131,29 @@ static const struct security_configuration user_security_conf = {
     .sec_req  = GAP_NO_SEC,
 };
 
+/*
+ * KE message heap size (bytes of payload; jump_table.c adds a 12-byte block header).
+ *
+ * The SDK default is RWIP_HEAP_MSG_SIZE_USER == 1392 bytes, which is the *only*
+ * source of KE messages. At an MTU of 247 every ATT write allocates a ~250-byte
+ * message, so the default pool holds only ~5 in flight. Streaming the 30,000-byte
+ * tri-color frame faster than the stack drains it exhausts the pool, and the
+ * allocator then hands out blocks that overlap already-freed ones (observed: a
+ * faulting ke_msg whose 12 bytes sat on top of an 0xA55A free-block header in
+ * rwip_heap_msg_ret), which the ROM dereferences as a garbage handler address.
+ *
+ * Raised to 1904 to absorb the write burst. The retained RAM region
+ * (LR_RETAINED_RAM0) has only ~640 bytes of slack, so this cannot grow much further
+ * without shrinking eink_framebuffer, which accounts for 30,000 of our 30,316
+ * bytes of .bss.
+ *
+ * The EINK_DIAG=1 build adds ~650 bytes of retained RAM for the CRC history, which
+ * does not fit alongside the enlarged pool (LR_RETAINED_RAM0 overflows by ~456 B).
+ * Diagnostic builds therefore fall back to the SDK default so they always link;
+ * EINK_DIAG is a debugging build, so it does not need the bigger pool.
+ */
+#if !EINK_DIAG
+#define MSG_HEAP_SZ  (1904)
+#endif
+
 #endif // _USER_CONFIG_H_

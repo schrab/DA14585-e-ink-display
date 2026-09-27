@@ -35,9 +35,14 @@ SIZE         := $(TOOLCHAIN_BIN)$(CROSS_COMPILE)size
 CPU_FLAGS    := -mcpu=cortex-m0 -mthumb
 
 # ─── Preprocessor Defines ────────────────────────────────────────────────────
+# EINK_DIAG=1 builds the RAM-CRC diagnostics into user_eink_diag.c; the default 0
+# leaves them out so they do not consume retained RAM that the KE message heap needs.
+EINK_DIAG   ?= 0
+
 DEFINES      := \
     -D__DA14585__ \
-    -D__ARM_FEATURE_DSP=0
+    -D__ARM_FEATURE_DSP=0 \
+    -DEINK_DIAG=$(EINK_DIAG)
 
 # ─── Pre-Included Headers (Dialog SDK architecture) ──────────────────────────
 PREINCLUDES  := \
@@ -170,11 +175,20 @@ APP_SRCS     := \
     src/user_periph_setup.c \
     ../ssd1619.c
 
+ifeq ($(EINK_DIAG),1)
+APP_SRCS     += ble/user_eink_diag.c
+$(BUILD_DIR)/user_eink_diag.o: ble/user_eink_diag.c | $(BUILD_DIR)
+	@echo "[CC] $<"
+	$(CC) $(CFLAGS) -c $< -o $@
+endif
+
+
 # ─── SDK BLE Core Source Files ────────────────────────────────────────────────
 SDK_SRCS     := \
     $(SDK_PATH)/sdk/platform/arch/main/arch_main.c \
     $(SDK_PATH)/sdk/platform/arch/main/arch_sleep.c \
     $(SDK_PATH)/sdk/platform/arch/main/arch_system.c \
+    $(SDK_PATH)/sdk/platform/arch/main/arch_hibernation.c \
     $(SDK_PATH)/sdk/platform/arch/main/jump_table.c \
     $(SDK_PATH)/sdk/platform/arch/main/hardfault_handler.c \
     $(SDK_PATH)/sdk/platform/arch/main/nmi_handler.c \
@@ -188,6 +202,10 @@ SDK_SRCS     := \
     $(SDK_PATH)/sdk/platform/driver/syscntl/syscntl.c \
     $(SDK_PATH)/sdk/platform/driver/battery/battery.c \
     $(SDK_PATH)/sdk/platform/driver/adc/adc_58x.c \
+    $(SDK_PATH)/sdk/platform/driver/dma/dma.c \
+    $(SDK_PATH)/sdk/platform/driver/uart/uart.c \
+    $(SDK_PATH)/sdk/platform/driver/i2c/i2c.c \
+    $(SDK_PATH)/sdk/platform/utilities/otp_cs/otp_cs.c \
     $(SDK_PATH)/sdk/platform/driver/spi_flash/spi_flash.c \
     $(SDK_PATH)/sdk/platform/driver/i2c_eeprom/i2c_eeprom.c \
     $(SDK_PATH)/sdk/platform/driver/wkupct_quadec/wkupct_quadec.c \
@@ -215,6 +233,10 @@ SDK_SRCS     := \
     $(SDK_PATH)/sdk/platform/arch/main/arch_rom.c \
     $(SDK_PATH)/sdk/platform/utilities/otp_hdr/otp_hdr.c \
     $(SDK_PATH)/sdk/app_modules/src/app_common/app_msg_utils.c \
+    $(SDK_PATH)/sdk/app_modules/src/app_common/app_utils.c \
+    $(SDK_PATH)/sdk/app_modules/src/app_easy/app_easy_storage.c \
+    $(SDK_PATH)/sdk/app_modules/src/app_easy/app_easy_crypto.c \
+    $(SDK_PATH)/sdk/app_modules/src/app_easy/app_easy_whitelist.c \
     $(SDK_PATH)/sdk/app_modules/src/app_entry/app_entry_point.c \
     $(SDK_PATH)/third_party/rand/chacha20.c \
     $(SDK_PATH)/third_party/hash/hash.c

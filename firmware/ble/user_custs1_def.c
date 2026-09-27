@@ -67,11 +67,14 @@ const struct attm_desc_128 custs1_att_db[EINK_CUSTS1_IDX_NB] =
         0, 0, NULL
     },
 
-    // Characteristic Value — Write (with response) + Notify
+    // Characteristic Value — Write (with response) + Write Without Response + Notify
+    // WRITE_COMMAND is required so the host can use Write Without Response. The
+    // Write-With-Response path currently hardfaults inside the ROM ATT response
+    // handler, so write-without-response is the only working transport right now.
     [EINK_CMD_VAL] = {
         (uint8_t*)EINK_CMD_UUID,
         ATT_UUID_128_LEN,
-        PERM(WR, ENABLE) | PERM(WRITE_REQ, ENABLE) | PERM(NTF, ENABLE),
+        PERM(WR, ENABLE) | PERM(WRITE_REQ, ENABLE) | PERM(WRITE_COMMAND, ENABLE) | PERM(NTF, ENABLE),
         DEF_EINK_CMD_CHAR_LEN, 0, NULL
     },
 

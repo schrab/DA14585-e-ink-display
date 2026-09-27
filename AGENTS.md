@@ -278,6 +278,49 @@ The firmware uses an efficient multiplexing scheme where SPI lines are shared be
 
 ---
 
+## 8b. ⚠️ RAM Budget & Known Firmware Bugs
+
+**The RAM budget is the binding constraint on any further firmware work.** This SoC has
+no internal flash — the application executes from SysRAM1, so code, data, the 30 KB
+framebuffer, the stacks and the BLE heaps all compete for the same 96 KB.
+
+| Region | Bytes |
+|---|---|
+| `code` (.text + .rodata) | 30,944 |
+| `data` + `.bss` — `eink_framebuffer` is **30,000** of this | 30,316 |
+| `rwip_heap_non_ret` | 1,036 |
+| main stack | 2,048 |
+| `RET_HEAP` (env 628 + db 1,036 + msg 1,916) | 3,580 |
+| **slack left in `LR_RETAINED_RAM0`** | **128** |
+
+`eink_framebuffer` is **91 % of `.bss`**. The retained region is full, so the KE message
+heap cannot grow further without shrinking the framebuffer.
+
+### Two known bugs — see [`BLE_CRASH_DIAGNOSIS.md`](BLE_CRASH_DIAGNOSIS.md)
+
+1. **FIXED — KE message heap starvation.** `jump_table.c` hard-codes the only KE message
+   pool (`rwip_heap_msg_ret`) to 1392 B. Streaming 30 KB at MTU 247 (~250 B per message)
+   exhausted it, and the allocator returned blocks overlapping freed ones — the watchdog
+   then reset the board. Fixed by `#define MSG_HEAP_SZ (1904)` in `user_config.h`.
+   **Do not reduce this value.**
+
+2. **OPEN — HardFault on any ATT Write Request.** Write *with* response (`response=True`)
+   faults in the ROM's `ke_queue_insert` (`blx r5` @ `0x07F1BDDA`, LR `0x07F1BDDD`), which
+   dispatches a garbage handler `0x50001500` = `GP_ADC_CTRL_REG`. Write *without* response
+   works. **Use Write Without Response until this is fixed.** Note that Write Commands
+   have no link-layer retransmission, so the image tail can be dropped — re-send, or poll
+   command `0x08` until `eink_rx_bytes` reads 30000.
+
+### Operational notes
+* `make flash` needs `PYTHON=../venv/bin/python` (bare `python3` has no `pyocd`).
+* The Makefile has **no header dependency tracking** — `make clean` after editing any
+  `-include`d config header.
+* A faulted board stops advertising (`HardFault_HandlerC` halts with
+  `CFG_DEVELOPMENT_DEBUG`). Recover with `./venv/bin/python reboot_target.py`.
+  `IPSR`: `0` healthy, `2` NMI/watchdog, `3` HardFault.
+
+---
+
 ## 9. DA14585 Bootloader & Dual-Image Architecture
 
 ### Boot Flow & Reset Stages
@@ -333,6 +376,10 @@ The firmware uses an efficient multiplexing scheme where SPI lines are shared be
 * [`firmware/Makefile`](file:///C:/Users/schra/Developer/DA14585-eink-display/firmware/Makefile): Automated cross-platform build pipeline (Linux + Windows) for compiling SDK BLE stack and flashing (`make all`, `make flash`, `make clean`).
 * [`firmware/mkimage.py`](file:///C:/Users/schra/Developer/DA14585-eink-display/firmware/mkimage.py): Standalone Python packager that creates 64-byte Dialog Image Headers with bit-exact CRC-32 calculation.
 * [`ble_eink_client.py`](file:///C:/Users/schra/Developer/DA14585-eink-display/ble_eink_client.py): Python Bleak-based wireless image transmitter supporting 30,000-byte tri-color streaming at ~7.6 KB/s and display refresh triggers.
+* [`upload_noresp.py`](upload_noresp.py): Uploader over ATT Write Without Response — the only transport that does not currently hardfault.
+* [`repro_disconnect.py`](repro_disconnect.py): Deterministic reproducer for the mid-refresh disconnect fault.
+* [`diag_crc.py`](diag_crc.py) + [`regen_diag_regions.py`](regen_diag_regions.py): SWD reader/differ for the retained RAM-CRC snapshot history, and the generator for its region table.
+* [`BLE_CRASH_DIAGNOSIS.md`](BLE_CRASH_DIAGNOSIS.md): Full write-up of the KE message heap starvation fix and the open Write-With-Request HardFault.
 * [`flash_spi_firmware.py`](file:///C:/Users/schra/Developer/DA14585-eink-display/flash_spi_firmware.py): Standalone open-source SPI NOR flash programmer using ST-Link V2 (SWD). Includes embedded 1,008-byte Thumb-1 flasher stub (`flash_raw.bin`), sector erase, page write, read, verify, and software reset.
 * [`flash_raw.c`](file:///C:/Users/schra/Developer/DA14585-eink-display/flash_raw.c) / [`flash_raw.bin`](file:///C:/Users/schra/Developer/DA14585-eink-display/flash_raw.bin): Pure standalone C Cortex-M0 RAM stub for bit-banged SPI NOR flash communication with automatic PMU wake, flash sleep exit (`0xAB`), and watchdog reload.
 * [`check_target_now.py`](file:///C:/Users/schra/Developer/DA14585-eink-display/check_target_now.py): Real-time core state, PC, register, and GPIO inspector.
