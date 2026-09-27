@@ -242,29 +242,92 @@ The firmware uses an efficient multiplexing scheme where SPI lines are shared be
 | PHASE 5: Standalone Toolchain & SPI NOR Flash Writer (COMPLETED)      |
 | - Set up GNU Arm Embedded Toolchain 14.2 & GNU Make 3.81             |
 | - Reverse-engineered firmware flash write/erase routines & opcodes    |
-| - Created RAM-injected Cortex-M0 flasher stub (flash_helper.c/bin)    |
+| - Built 1008-byte zero-dependency RAM flasher stub (flash_raw.c/bin)  |
 | - Built standalone ST-Link V2 SPI flash writer (flash_spi_firmware.py)|
-| - In-silicon verified 4KB sector erase, 64KB block erase, page write, |
-|   and SHA256 byte-by-byte readback verification without J-Link        |
+| - In-silicon verified 4KB sector erase, page write, and verify        |
++-----------------------------------------------------------------------+
+                                  |
+                                  v
++-----------------------------------------------------------------------+
+| PHASE 6: Custom Bare-Metal C Firmware & Flash Boot (COMPLETED)        |
+| - Developed standalone GNU Make + GCC project in firmware/            |
+| - Implemented SysRAM1 linker script (ldscript_da14585.ld)             |
+| - Resolved CMSIS Cortex-M0 zero-table unaligned fault (byte count)   |
+| - Built standalone Dialog image packager (firmware/mkimage.py)        |
+| - Reverse-engineered Dialog Boot ROM & Secondary Bootloader handoff:  |
+|   * Product Header at 0x038000 (0x70 0x52)                            |
+|   * 64-byte s_imageHeader (0x70 0x51), CRC32, and imageid arbitration |
+|   * Start_run_user_application() SW_RESET via SYS_CTRL_REG (REMAP=2)  |
+| - Successfully programmed & verified permanent boot from flash        |
+| - Board boots standalone into custom firmware on hardware reset       |
 +-----------------------------------------------------------------------+
 ```
 
 ---
 
-## 9. Tooling Reference
+## 9. DA14585 Bootloader & Dual-Image Architecture
 
+### Boot Flow & Reset Stages
+1. **Cold Reset / Power-On**:
+   * Hardware pulls `SYS_CTRL_REG.REMAP_ADR0 = 0` (Internal Boot ROM aliased to `0x00000000`).
+   * Boot ROM checks SPI pins (`P0_0` CLK, `P0_3` CS, `P0_5` MISO, `P0_6` MOSI).
+   * Reads 8-byte AN-B-001 SPI Header at `0x000000` of SPI flash (`0x70 0x50`, length `0x2816` = 10,262 bytes).
+   * Copies 10,262 bytes into `SYSRAM_BASE_ADDRESS` (`0x07FC0000`).
+   * Executes **Secondary Bootloader** (`da14585_bootloader.bin`) at `0x07FC00B5`.
+2. **Secondary Bootloader Execution**:
+   * Bootloader relocates SPI flash driver functions into SysRAM4 (`0x07FD6000`), allowing the lower SysRAM1 (`0x07FC0000`) to be overwritten.
+   * Reads **Product Header** at `0x038000`:
+     * Magic: `0x70 0x52` (`pR`)
+     * Offset 1: `0x004000` (Image 1)
+     * Offset 2: `0x01F000` (Image 2)
+   * Reads 64-byte Image Headers from Image 1 and Image 2:
+     * Magic: `0x70 0x51` (`pQ`), Valid Flag: `0xAA`
+     * Evaluates `findlatest(id1, id2)`: Image with highest ID is chosen (Image 1 ID `3` supersedes Image 2 ID `2`).
+   * Copies selected image code into `0x07FC0000`.
+   * Verifies CRC32 (`crc32(0, 0x07FC0000, code_size) == ImageHeader->CRC`).
+   * Calls `Start_run_user_application()`:
+     ```c
+     // Remap address 0 to SysRAM1 (0x07FC0000) and trigger Software Reset
+     SetWord16(SYS_CTRL_REG, (GetWord16(SYS_CTRL_REG) & ~0x0003) | 0x0002 | 0x8000);
+     ```
+3. **Application Boot**:
+   * Cortex-M0 resets. Because `REMAP_ADR0 == 2`, address `0x00000000` maps to `0x07FC0000`.
+   * Core fetches Initial SP from `0x07FC0000` and Reset_Handler from `0x07FC0004`.
+   * Custom application executes!
+
+### 64-Byte Image Header (`s_imageHeader`) Format
+| Byte Offset | Size | Field Name | Value / Description |
+|:---:|:---:|:---|:---|
+| `0x00 - 0x01` | 2 B | `signature` | `0x70 0x51` (`pQ`) |
+| `0x02` | 1 B | `validflag` | `0xAA` (`STATUS_VALID_IMAGE`) |
+| `0x03` | 1 B | `imageid` | Integer sequence ID (`3` to supersede factory image ID `2`) |
+| `0x04 - 0x07` | 4 B | `code_size` | Length of application binary in bytes (little-endian) |
+| `0x08 - 0x0B` | 4 B | `CRC` | Standard CRC-32 (zlib / IEEE 802.3) of application binary |
+| `0x0C - 0x1B` | 16 B | `version` | Null-terminated ASCII version string, padded with `0xFF` |
+| `0x1C - 0x1F` | 4 B | `timestamp` | Unix epoch timestamp (little-endian unsigned 32-bit int) |
+| `0x20` | 1 B | `flags` | `0x00` |
+| `0x21` | 1 B | `encryption_pad` | `0x00` |
+| `0x22 - 0x27` | 6 B | `keyInfo` | `0xFF` * 6 (unused / unencrypted) |
+| `0x28 - 0x3F` | 24 B | `reserved` | `0xFF` * 24 |
+
+---
+
+## 10. Tooling Reference
+
+* [`flash_spi_firmware.py`](file:///C:/Users/schra/Developer/DA14585-eink-display/flash_spi_firmware.py): Standalone open-source SPI NOR flash programmer using ST-Link V2 (SWD). Includes embedded 1,008-byte Thumb-1 flasher stub (`flash_raw.bin`), sector erase, page write, read, verify, and software reset.
+* [`flash_raw.c`](file:///C:/Users/schra/Developer/DA14585-eink-display/flash_raw.c) / [`flash_raw.bin`](file:///C:/Users/schra/Developer/DA14585-eink-display/flash_raw.bin): Pure standalone C Cortex-M0 RAM stub for bit-banged SPI NOR flash communication with automatic PMU wake, flash sleep exit (`0xAB`), and watchdog reload.
+* [`firmware/Makefile`](file:///C:/Users/schra/Developer/DA14585-eink-display/firmware/Makefile): Automated build pipeline for custom DA14585 C applications (`make all`, `make flash`, `make clean`).
+* [`firmware/ldscript_da14585.ld`](file:///C:/Users/schra/Developer/DA14585-eink-display/firmware/ldscript_da14585.ld): GNU ld linker script targeting DA14585 SysRAM1 with correct CMSIS zero-table byte alignment.
+* [`firmware/mkimage.py`](file:///C:/Users/schra/Developer/DA14585-eink-display/firmware/mkimage.py): Standalone Python packager that creates 64-byte Dialog Image Headers with bit-exact CRC-32 calculation.
+* [`test_ram_boot.py`](file:///C:/Users/schra/Developer/DA14585-eink-display/test_ram_boot.py): Direct SWD SysRAM firmware boot and diagnostic runner.
 * [`da14585_probe.py`](file:///C:/Users/schra/Developer/DA14585-eink-display/da14585_probe.py): Hardware connection, register dump, and vector table decoder.
 * [`dump_spi_flash.py`](file:///C:/Users/schra/Developer/DA14585-eink-display/dump_spi_flash.py): SWD RAM-injected high-speed SPI NOR flash dumper.
-* [`flash_spi_firmware.py`](file:///C:/Users/schra/Developer/DA14585-eink-display/flash_spi_firmware.py): Standalone open-source SPI NOR flash programmer using ST-Link V2 (SWD). Supports write, verify, erase, and dump without Segger J-Link or ezFlashCLI.
-* [`flash_helper.c`](file:///C:/Users/schra/Developer/DA14585-eink-display/flash_helper.c) / [`flash_helper.bin`](file:///C:/Users/schra/Developer/DA14585-eink-display/flash_helper.bin): 144-byte Cortex-M0 RAM execution stub for high-speed SPI NOR flash programming and sector erase with active hardware watchdog feeding.
-* [`extract_partitions.py`](file:///C:/Users/schra/Developer/DA14585-eink-display/extract_partitions.py): Automated flash carver for bootloader, dual app images, and NVDS.
-* [`find_eink_driver.py`](file:///C:/Users/schra/Developer/DA14585-eink-display/find_eink_driver.py): Traces GPIO calls and driver subroutines.
-* [`format_uuids.py`](file:///C:/Users/schra/Developer/DA14585-eink-display/format_uuids.py): Formats extracted BLE GATT service and characteristic UUIDs.
-* [`generate_test_image.py`](file:///C:/Users/schra/Developer/DA14585-eink-display/generate_test_image.py): Generates 400x300 monochrome test pattern and 15,000-byte raw framebuffer.
-* [`test_eink_hardware.py`](file:///C:/Users/schra/Developer/DA14585-eink-display/test_eink_hardware.py): In-silicon monochrome test driver with active watchdog-fed retention.
-* [`generate_red_test_image.py`](file:///C:/Users/schra/Developer/DA14585-eink-display/generate_red_test_image.py): Generates 400x300 tri-color test image and splits into dual 15,000-byte BW and Red buffers.
-* [`test_eink_red.py`](file:///C:/Users/schra/Developer/DA14585-eink-display/test_eink_red.py): Injects dual-buffer tri-color graphics into SysRAM and drives physical 3-color panel refresh.
+* [`extract_partitions.py`](file:///C:/Users/schra/Developer/DA14585-eink-display/extract_partitions.py): Flash partition carver for bootloader, dual app images, and NVDS.
 * [`display_image.py`](file:///C:/Users/schra/Developer/DA14585-eink-display/display_image.py): Universal image pipeline converting PNG/BMP graphics into dual-buffer tri-color e-ink framebuffers and flashing to hardware.
+* [`test_eink_red.py`](file:///C:/Users/schra/Developer/DA14585-eink-display/test_eink_red.py): Injects dual-buffer tri-color graphics into SysRAM and drives physical 3-color panel refresh.
+* [`generate_red_test_image.py`](file:///C:/Users/schra/Developer/DA14585-eink-display/generate_red_test_image.py): Generates 400x300 tri-color test image and splits into dual 15,000-byte BW and Red buffers.
+* [`test_eink_hardware.py`](file:///C:/Users/schra/Developer/DA14585-eink-display/test_eink_hardware.py): In-silicon monochrome test driver with active watchdog-fed retention.
+* [`generate_test_image.py`](file:///C:/Users/schra/Developer/DA14585-eink-display/generate_test_image.py): Generates 400x300 monochrome test pattern and 15,000-byte raw framebuffer.
 * [`check_target_now.py`](file:///C:/Users/schra/Developer/DA14585-eink-display/check_target_now.py): Real-time core state, PC, register, and GPIO inspector.
 * [`ssd1619.h`](file:///C:/Users/schra/Developer/DA14585-eink-display/ssd1619.h) / [`ssd1619.c`](file:///C:/Users/schra/Developer/DA14585-eink-display/ssd1619.c): Standalone C driver for SSD1619 / SSD1683 displays with monochrome & tri-color API.
 * [`ble_eink_client.py`](file:///C:/Users/schra/Developer/DA14585-eink-display/ble_eink_client.py): Python Bleak-based OTA image transmitter for stock BLE firmware.

@@ -26,11 +26,16 @@
 /* Local Framebuffer in SysRAM (15,000 bytes) */
 static uint8_t epd_framebuffer[EPD_FRAMEBUFFER_SIZE];
 
-/* Simple CPU busy-wait delay at 16 MHz */
+/* Hardware Watchdog Reload */
+#define WATCHDOG_REG        (*(volatile uint16_t *)0x50003100)
+#define WATCHDOG_RELOAD()   do { WATCHDOG_REG = 0xC8; } while (0)
+
+/* Simple CPU busy-wait delay at 16 MHz with watchdog reload */
 static void delay_ms(uint32_t ms)
 {
     while (ms--) {
-        for (volatile uint32_t i = 0; i < 5333; i++) {
+        WATCHDOG_RELOAD();
+        for (volatile uint32_t i = 0; i < 2666; i++) {
             __asm__ volatile ("nop");
         }
     }
@@ -56,6 +61,7 @@ void epd_gpio_init(void)
 {
     /* Mode: 0x0300 = OUTPUT (PID 0 GPIO) */
     P00_MODE_REG = 0x0300; /* CLK */
+    (*(volatile uint16_t *)0x5000300C) = 0x0300; /* P0_3: FLASH_CS output */
     P05_MODE_REG = 0x0300; /* D/C */
     P06_MODE_REG = 0x0300; /* MOSI */
     P07_MODE_REG = 0x0300; /* RST */
@@ -65,7 +71,7 @@ void epd_gpio_init(void)
     P23_MODE_REG = 0x0300; /* PWR_EN */
 
     /* Default pin states */
-    P0_SET_DATA_REG = (1 << EPD_PIN_DC) | (1 << EPD_PIN_RST);
+    P0_SET_DATA_REG = (1 << 3) | (1 << EPD_PIN_DC) | (1 << EPD_PIN_RST); /* FLASH_CS=1, DC=1, RST=1 */
     P0_RESET_DATA_REG = (1 << EPD_PIN_CLK) | (1 << EPD_PIN_MOSI);
     P2_SET_DATA_REG = (1 << EPD_PIN_CS);
     P2_RESET_DATA_REG = (1 << EPD_PIN_PWR_EN);
@@ -86,6 +92,7 @@ void epd_wait_busy(void)
 {
     /* Loop while EPD_BUSY (P2_0) is active HIGH (1) */
     while (P2_DATA_REG & (1 << EPD_PIN_BUSY)) {
+        WATCHDOG_RELOAD();
         delay_ms(1);
     }
 }
@@ -195,6 +202,9 @@ void epd_display_refresh_tricolor(const uint8_t *bw_bitmap, const uint8_t *red_b
     P2_RESET_DATA_REG = (1 << EPD_PIN_CS);
 
     for (uint32_t i = 0; i < EPD_FRAMEBUFFER_SIZE; i++) {
+        if ((i & 0x3FF) == 0) {
+            WATCHDOG_RELOAD();
+        }
         epd_spi_write_byte(bw_bitmap ? bw_bitmap[i] : 0xFF);
     }
     P2_SET_DATA_REG = (1 << EPD_PIN_CS);
@@ -203,6 +213,9 @@ void epd_display_refresh_tricolor(const uint8_t *bw_bitmap, const uint8_t *red_b
     epd_write_command(EPD_CMD_WRITE_RAM_RED);
     P2_RESET_DATA_REG = (1 << EPD_PIN_CS);
     for (uint32_t i = 0; i < EPD_FRAMEBUFFER_SIZE; i++) {
+        if ((i & 0x3FF) == 0) {
+            WATCHDOG_RELOAD();
+        }
         epd_spi_write_byte(red_bitmap ? red_bitmap[i] : 0x00);
     }
     P2_SET_DATA_REG = (1 << EPD_PIN_CS);
@@ -213,6 +226,9 @@ void epd_display_refresh_tricolor(const uint8_t *bw_bitmap, const uint8_t *red_b
 
     /* 4. Master Activation: start panel physical refresh */
     epd_write_command(EPD_CMD_MASTER_ACTIVATION);
+
+    /* Allow BUSY line to assert high before waiting */
+    delay_ms(50);
 
     /* 5. Wait for refresh completion (~17.08s physical electrophoretic cycle) */
     epd_wait_busy();

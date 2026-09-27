@@ -18,3 +18,14 @@ Thumbs.db
 ehthumbs.db
 Desktop.ini
 .DS_Store
+
+# Build artifacts
+firmware/build/
+*.elf
+*.map
+temp_*
+dump_*.bin
+test_hdr*.bin
+test_code*.bin
+test_ph*.bin
+test_img2_*.bin

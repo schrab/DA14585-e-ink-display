@@ -173,3 +173,45 @@ python test_eink_hardware.py
 ```bash
 python ble_eink_client.py --image test_pattern_400x300.png
 ```
+
+---
+
+## 8. Custom Firmware Development & Standalone Flashing
+
+You can build and deploy your own bare-metal C applications using the GNU Arm Embedded Toolchain (`arm-none-eabi-gcc`) and program them directly to the FM25Q04 SPI NOR flash via ST-Link V2.
+
+### Prerequisites
+* **Arm GNU Toolchain**: `arm-none-eabi-gcc` 10.x / 14.x
+* **Build System**: GNU Make
+* **Python Dependencies**: `pip install pyocd Pillow bleak`
+* **DA145xx SDK**: SDK 6.0.x (e.g. `DA145xx_SDK/6.0.24.1464` or SDK headers included in repo)
+
+### 1. Build Custom Firmware
+```bash
+cd firmware
+make all
+```
+* Compiles `main.c`, `user_periph_setup.c`, `ssd1619.c`, and Dialog system initialization files.
+* Links using [`ldscript_da14585.ld`](firmware/ldscript_da14585.ld) directly into SysRAM1 (`0x07FC0000`).
+* Generates `build/eink_firmware.bin` and packages it into `build/eink_firmware.img` with a 64-byte Dialog Image Header via [`mkimage.py`](firmware/mkimage.py).
+
+### 2. Flash Directly to SPI NOR Flash via ST-Link V2
+```bash
+make flash
+```
+Or run the flasher directly from the root directory:
+```bash
+python flash_spi_firmware.py write firmware/build/eink_firmware.img --addr 0x004000 --reset
+```
+* **No Segger J-Link or proprietary tools required!**
+* Automatically wakes the FM25Q04 NOR flash from deep sleep (`0xAB`).
+* Erases required 4 KB sectors and programs 256-byte pages via an injected 1,008-byte Thumb-1 RAM stub ([`flash_raw.bin`](flash_raw.bin)).
+* Verifies written data bit-by-bit against the local image.
+* Issues software reset: the chip boots via the secondary bootloader, loads the new image, renders to the e-ink screen, and begins its low-power heartbeat loop.
+
+### 3. Test In-RAM Execution via SWD (Optional)
+To test custom code instantly in SysRAM without writing to flash:
+```bash
+python test_ram_boot.py
+```
+
