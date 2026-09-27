@@ -123,6 +123,8 @@ The factory firmware exposes a custom GATT service for wireless over-the-air scr
 
 | File | Purpose |
 |:---|:---|
+| [`flash_spi_firmware.py`](flash_spi_firmware.py) | **Standalone SPI NOR Flash Writer**: Open-source programmer using ST-Link V2. Supports erase (4KB/64KB/chip), smart page write, and SHA256 verify without Segger J-Link or ezFlashCLI. |
+| [`display_image.py`](display_image.py) | **Universal Image Pipeline**: Converts Photoshop PNG/BMP artwork into tri-color framebuffers and flashes directly to the e-ink screen in silicon. |
 | [`test_eink_red.py`](test_eink_red.py) | **In-silicon Tri-Color Hardware Test**: Injects dual BW and Red framebuffers into SysRAM, triggers 3-color panel refresh, and maintains permanent retention. |
 | [`generate_red_test_image.py`](generate_red_test_image.py) | **Tri-Color Generator**: Creates 400&times;300 PIL graphic with red banner, borders, color swatches, and checkerboard; exports dual 15,000-byte buffers. |
 | [`test_eink_hardware.py`](test_eink_hardware.py) | **In-silicon Monochrome Hardware Test**: Injects 15,000-byte BW buffer and triggers full hardware refresh with watchdog retention. |
