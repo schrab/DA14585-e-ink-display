@@ -287,7 +287,7 @@ framebuffer, the stacks and the BLE heaps all compete for the same 96 KB.
 | Region | Bytes |
 |---|---|
 | `code` (.text + .rodata) | 30,944 |
-| `data` + `.bss` — `eink_framebuffer` is **30,000** of this | 30,316 |
+| `data` + `.bss` — `eink_framebuffer` is 30,000 and `eink_chunk_map` 16 of this | 30,332 |
 | `rwip_heap_non_ret` | 1,036 |
 | main stack | 2,048 |
 | `RET_HEAP` (env 628 + db 1,036 + msg 1,916) | 3,580 |
@@ -296,7 +296,7 @@ framebuffer, the stacks and the BLE heaps all compete for the same 96 KB.
 `eink_framebuffer` is **91 % of `.bss`**. The retained region is full, so the KE message
 heap cannot grow further without shrinking the framebuffer.
 
-### Two known bugs — see [`BLE_CRASH_DIAGNOSIS.md`](BLE_CRASH_DIAGNOSIS.md)
+### Three known bugs — see [`BLE_CRASH_DIAGNOSIS.md`](BLE_CRASH_DIAGNOSIS.md)
 
 1. **FIXED — KE message heap starvation.** `jump_table.c` hard-codes the only KE message
    pool (`rwip_heap_msg_ret`) to 1392 B. Streaming 30 KB at MTU 247 (~250 B per message)
@@ -304,12 +304,17 @@ heap cannot grow further without shrinking the framebuffer.
    then reset the board. Fixed by `#define MSG_HEAP_SZ (1904)` in `user_config.h`.
    **Do not reduce this value.**
 
-2. **OPEN — HardFault on any ATT Write Request.** Write *with* response (`response=True`)
+1. **OPEN — HardFault on any ATT Write Request.** Write *with* response (`response=True`)
    faults in the ROM's `ke_queue_insert` (`blx r5` @ `0x07F1BDDA`, LR `0x07F1BDDD`), which
    dispatches a garbage handler `0x50001500` = `GP_ADC_CTRL_REG`. Write *without* response
-   works. **Use Write Without Response until this is fixed.** Note that Write Commands
-   have no link-layer retransmission, so the image tail can be dropped — re-send, or poll
-   command `0x08` until `eink_rx_bytes` reads 30000.
+   works. **Use Write Without Response until this is fixed.**
+
+2. **FIXED — silent chunk loss.** Write Commands have no link-layer retransmission, so the
+   host outruns the peripheral and chunks are dropped. This is a **contiguous band, not
+   just the tail**, so a byte counter cannot detect it. `user_eink_app.h` now defines a
+   240-byte wire chunk (`EINK_CHUNK_SIZE`, 125 chunks); `eink_chunk_map[16]` records
+   receipt per chunk and command `0x08` notifies the bitmap. `upload_noresp.py` re-sends
+   only the missing chunks and now yields a **byte-exact 30,000-byte upload**.
 
 ### Operational notes
 * `make flash` needs `PYTHON=../venv/bin/python` (bare `python3` has no `pyocd`).

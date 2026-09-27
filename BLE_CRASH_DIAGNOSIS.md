@@ -154,12 +154,119 @@ Each of these was checked and found correct:
 Use ATT **Write Without Response**. It needs `PERM(WRITE_COMMAND, ENABLE)` on the
 characteristic, which was added to `EINK_CMD_VAL`.
 
-The caveat is that Write Commands have **no link-layer retransmission**, so the host can
-outrun the peripheral and the tail is silently dropped — 160 bytes lost at 14.4 KB/s.
-This is a transport property, not corruption. The image protocol is already idempotent
-(every packet is a `memcpy` at an explicit offset), so the robust fix is client-side:
-re-send the tail, or poll command `0x08` (which notifies `eink_rx_bytes`) until it reads
-30000.
+Write Commands have **no link-layer retransmission**, so the host can outrun the
+peripheral and chunks are silently dropped. That caveat is severe enough to have driven a
+protocol change — see §2b.
+
+### Claims that were evaluated and do not hold here
+
+For the benefit of the next person, these were suggested and checked against this build:
+
+* **"`.bss` risks overlapping into SysRAM3, so move the framebuffer to SysRAM4
+  (`0x07FD0000`)."** Measured bounds: `.bss` = `0x07FC7648`..`0x07FCEC44`, which is SysRAM1
+  plus part of SysRAM2; SysRAM3 begins at `0x07FCC000`, leaving a `0x33BC` byte gap. The
+  stack is at `0x07FCF100`..`0x07FCF900` (SysRAM3), and the linker asserts
+  `__StackLimit >= __HeapLimit`, which passes. SysRAM4 is also **not** free — it holds
+  `intr_cb` (`0x07FD4938`), `prf_env`, `app_state`, `ke_free_bad`, `ke_mem_heaps_used`,
+  `ke_env` and the `RET_HEAP` block. Putting the framebuffer there would collide with
+  kernel state. **Relocating it out of `.bss` is still a reasonable idea** (SPI flash has
+  ~450 KB spare) but `0x07FD0000` is the wrong destination.
+* **"A double free in the write handler corrupts the queue."** We never call
+  `ke_msg_free`/`ke_param2msg` and our catch-all returns `void`, so the SDK frees the
+  message itself. No double free is possible.
+* **"A failed `ke_msg_alloc` returns NULL and `ke_msg_send(NULL)` hardfaults."** Per the
+  SDK's own platform reference, allocation failure across all heaps issues a *system
+  software reset*, not a HardFault. We also never allocate a `GATTC_WRITE_CFM`.
+* **"The `PERM(RI)`/`PERM(WRITE_COMMAND)` permissions cause the write-response crash."**
+  Our attribute table is byte-equivalent to the official template in this respect, and
+  adding `WRITE_COMMAND` changed nothing.
+
+The underlying idea that *is* worth keeping from that line of thinking: the crash message
+overlaps a freed KE block, so an allocator/free-list problem remains the most plausible
+remaining cause — it just is not a double free on the application side.
+
+
+---
+
+## 2b. Fixed: silent chunk loss, and why a byte counter was not enough
+
+### Symptom
+
+Even at a clean 14.4 KB/s the uploaded image was wrong, with mismatches appearing from
+roughly byte 28800 onward. A retry often "worked", which is the worst kind of bug: it
+looks intermittent when it is deterministic.
+
+### The wrong conclusion I first drew
+
+I measured mismatches against the host-side conversion of the image and concluded the loss
+was a **contiguous tail run** (chunks 94..123 at 15 ms, 67..123 at 5 ms), and recommended
+"re-send the tail". **That conclusion was wrong, and so was the advice built on it.** One
+lucky sample had shown only the last chunk or two missing and I generalised from it.
+
+### Measuring it properly
+
+A resampled test pattern is a bad instrument here: it has large uniform regions, so a
+partially-written or stale chunk can coincidentally compare equal and hide the damage.
+The measurement that settled it stamps each 240-byte chunk with a 2-byte little-endian tag
+equal to its own index, making every chunk individually identifiable, then classifies the
+framebuffer as *received intact* / *never arrived* / *partial or stale*.
+
+Loss is a **contiguous band whose length varies with pacing**:
+
+| pacing | chunks intact | 
+|---|---|---|
+| 0 ms | 32/125 |
+| 5 ms | 43/125 |
+| 15 ms | 60-65/125 |
+| 30 ms | 86/125 |
+
+Three measurement traps, each of which produced wrong numbers first:
+
+* **The `0x07` clear is itself a Write Command**, so the "known baseline" can itself be
+  dropped. A single `0x07` is not a reliable baseline.
+* **Never read 30 KB over SWD while the BLE client is still connected.** Halting the core
+  for several seconds trips the supervision timeout, the link drops mid-stream, and the
+  run is void. Read back only *after* disconnecting.
+* Chunk 62 spans the plane boundary (offset 14880 = 120 B of BW + 120 B of Red), so an
+  "untouched" test must compare each byte against its own plane's clear value.
+
+### Why `eink_rx_bytes` cannot detect this
+
+`eink_rx_bytes` is a plain accumulator. With a contiguous band of loss it still reports a
+large, plausible-looking value while a wide band of the image is missing. It cannot
+distinguish "chunk 40 never arrived" from "everything after 40 is missing", and it cannot
+see a chunk that was written but holds stale bytes.
+
+### Fix: per-chunk receipt bitmap
+
+The image protocol is already idempotent (each write is a `memcpy` at an explicit offset),
+so re-sending is harmless — the only missing piece was knowing *what* to re-send.
+
+* `firmware/ble/user_eink_app.h` defines the wire chunking: `EINK_CHUNK_SIZE 240`
+  (240 + a 2-byte offset header = 242 <= MTU-3 = 244), `EINK_CHUNK_COUNT 125`,
+  `EINK_CHUNK_MAP_BYTES 16`.
+* `eink_chunk_map[16]` holds one bit per chunk. A bit is set only when a write lands
+  exactly on a chunk boundary, so a truncated or misaligned write cannot mark data good.
+* Command `0x07` (clear) zeroes the map; command `0x08` notifies
+  `map[16] || rx_bytes_lo || rx_bytes_hi` (18 bytes, within the 20-byte MTU-23 limit).
+* `upload_noresp.py` sends a pass, queries `0x08`, and re-sends only the chunks whose bit
+  is clear, repeating up to `--rounds` times. `--refresh` is now opt-in so routine runs
+  never touch the panel.
+
+### Verification
+
+```
+[+] All 125 chunks confirmed received after 1 send pass(es)
+[+] Stream complete in 11.2s
+IPSR=0 (healthy)
+EXACT MATCH over all 30,000 bytes: True
+  BW  plane mismatches: 0
+  Red plane mismatches: 0
+```
+
+The framebuffer was read back over SWD after disconnecting and compared byte-for-byte
+against the host-side conversion. This is the first run in the project with a **provably
+complete** upload.
 
 ---
 

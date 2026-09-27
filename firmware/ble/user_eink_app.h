@@ -54,9 +54,22 @@ void user_app_adv_start(void);
 
 /* ─── Custom GATT Write Handlers ─────────────────────────────────────────── */
 
+/* ─── Image Transfer Protocol ────────────────────────────────────────────── */
+
+/// Wire chunk size, in bytes. The host sends `EINK_CHUNK_SIZE` bytes of image per
+/// write, prefixed by a 2-byte little-endian offset. 240 + 2 = 242 <= MTU-3 (244).
+#define EINK_CHUNK_SIZE            (240)
+
+/// Total 30,000-byte dual-plane frame = 125 chunks.
+#define EINK_CHUNK_COUNT           (30000 / EINK_CHUNK_SIZE)
+
+/// Chunk-receipt bitmap: one bit per chunk, 125 bits = 16 bytes. Reported by
+/// command 0x08 so the host can re-send exactly the chunks that were dropped.
+#define EINK_CHUNK_MAP_BYTES       ((EINK_CHUNK_COUNT + 7) / 8)
+
 /**
  * @brief Handles a CUSTS1 write to the Command characteristic (0x9e1547ba...).
- *        Commands: 0x06=Refresh, 0x07=Clear, 0x08=Status
+ *        Commands: 0x06=Refresh, 0x07=Clear, 0x08=Status, 0x09=Diag snapshot
  */
 void user_eink_cmd_wr_handler(ke_msg_id_t const msgid,
                               struct custs1_val_write_ind const *param,

@@ -14,6 +14,7 @@ Usage:
 
 import argparse
 import asyncio
+import struct
 import sys
 import time
 
@@ -29,6 +30,11 @@ from ble_eink_client import (  # noqa: E402
 
 CLEAR = bytes([0x07])
 REFRESH = bytes([0x06])
+STATUS = bytes([0x08])
+
+CHUNK = 240                 # must match EINK_CHUNK_SIZE in the firmware
+NCHUNK = 125                # 30000 / 240
+MAP_BYTES = 16              # (125 + 7) // 8
 
 
 async def find_device():
@@ -43,8 +49,12 @@ async def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--image", "-i", default="test_pattern_red_400x300.png")
     ap.add_argument("--device", "-d", default=None)
-    ap.add_argument("--settle", type=float, default=1.0,
+    ap.add_argument("--settle", type=float, default=0.005,
                     help="seconds between packets")
+    ap.add_argument("--rounds", type=int, default=8,
+                    help="max verify-and-resend passes")
+    ap.add_argument("--refresh", action="store_true",
+                    help="send command 0x06 to redraw the panel (slow: ~17 s)")
     args = ap.parse_args()
 
     data = convert_image_to_tricolor_buffer(args.image)
@@ -58,35 +68,81 @@ async def main():
     print(f"[+] {args.image} -> {total} byte dual-plane buffer, {chunks} packets")
     print(f"[+] Connecting to {addr} (Write Without Response)...")
 
+    async def send_chunk(client, i):
+        off = i * CHUNK
+        pkt = bytearray([off & 0xFF, (off >> 8) & 0xFF])
+        pkt += data[off : off + CHUNK]
+        await client.write_gatt_char(CHAR_IMAGE_UUID, pkt, response=False)
+        if args.settle:
+            await asyncio.sleep(args.settle)
+
+    async def missing_chunks(client):
+        """Ask the firmware which chunks it has not received (command 0x08)."""
+        done = asyncio.Event()
+        got = {}
+
+        def on_notify(_, payload):
+            if payload and len(payload) >= MAP_BYTES:
+                got["map"] = bytes(payload[:MAP_BYTES])
+                done.set()
+
+        await client.start_notify(CHAR_CMD_UUID, on_notify)
+        await client.write_gatt_char(CHAR_CMD_UUID, STATUS, response=False)
+        try:
+            await asyncio.wait_for(done.wait(), timeout=5.0)
+        except asyncio.TimeoutError:
+            return None
+        finally:
+            try:
+                await client.stop_notify(CHAR_CMD_UUID)
+            except Exception:
+                pass
+        if "map" not in got:
+            return None
+        m = got["map"]
+        return [i for i in range(NCHUNK) if not (m[i >> 3] >> (i & 7)) & 1]
+
     async with BleakClient(addr) as client:
         await client.write_gatt_char(CHAR_CMD_UUID, CLEAR, response=False)
         print("[+] Buffer cleared")
 
         t0 = time.time()
-        for i in range(chunks):
-            off = i * MAX_CHUNK_PAYLOAD
-            pkt = bytearray([off & 0xFF, (off >> 8) & 0xFF])
-            pkt += data[off : off + MAX_CHUNK_PAYLOAD]
-            await client.write_gatt_char(CHAR_IMAGE_UUID, pkt, response=False)
-            await asyncio.sleep(args.settle)
-            if (i + 1) % 25 == 0 or i + 1 == chunks:
-                pct = (i + 1) / chunks * 100
-                print(f"    {i+1}/{chunks} ({pct:.0f}%)", flush=True)
+        for rnd in range(1, args.rounds + 1):
+            if rnd == 1:
+                todo = list(range(NCHUNK))
+            else:
+                await asyncio.sleep(1.0)   # let the stack drain what it already has
+                todo = await missing_chunks(client)
+                if todo is None:
+                    print("[!] Status query timed out; cannot verify this pass")
+                    break
+                if not todo:
+                    print(f"[+] All {NCHUNK} chunks confirmed received after {rnd-1} send pass(es)")
+                    break
+                print(f"[*] Firmware is missing {len(todo)} chunk(s); re-sending them")
+
+            for n, i in enumerate(todo):
+                await send_chunk(client, i)
+                if (n + 1) % 25 == 0:
+                    print(f"    pass {rnd}: {n+1}/{len(todo)}", flush=True)
+        else:
+            print("[!] Ran out of resend passes; image may be incomplete")
+
         dt = time.time() - t0
-        print(f"[+] Streamed {total} bytes in {dt:.1f}s ({total/dt/1024:.1f} KB/s)")
+        print(f"[+] Stream complete in {dt:.1f}s")
 
-        print("[*] Triggering e-ink refresh (0x06)...")
-        await client.write_gatt_char(CHAR_CMD_UUID, REFRESH, response=False)
-        print("[+] Refresh command sent; panel will cycle for ~17s")
-        await asyncio.sleep(2.0)
-        print("[*] Closing the link while the panel refreshes...")
-        await client.disconnect()
+        if args.refresh:
+            print("[*] Triggering e-ink refresh (0x06)...")
+            await client.write_gatt_char(CHAR_CMD_UUID, REFRESH, response=False)
+            print("[+] Refresh sent; the panel will cycle for ~17s")
+            await client.disconnect()
+            for i in range(20):
+                await asyncio.sleep(1)
+        else:
+            print("[*] Disconnecting (--refresh not given, so the panel is untouched)")
+            await client.disconnect()
 
-    print("[*] Waiting for the electrophoretic cycle to complete...")
-    for i in range(20):
-        await asyncio.sleep(1)
-        print(f"    {i+1:2d}s", flush=True)
-    print("[+] Done. The panel is bistable, so it now holds the new image with zero power.")
+    print("[+] Done.")
     return 0
 
 

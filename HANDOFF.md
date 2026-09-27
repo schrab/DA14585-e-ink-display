@@ -179,11 +179,21 @@ ROM's `ke_queue_insert`. A **Write Command** (`response=False`) works. Use
 ./venv/bin/python upload_noresp.py --image test_pattern_red_400x300.png
 ```
 
-Because Write Commands have no link-layer retransmission, the host can outrun the
-peripheral and the tail of the image is silently dropped (~160 bytes at 14.4 KB/s). The
-image protocol is idempotent — every packet is a `memcpy` at an explicit offset — so
-re-sending the tail, or polling command `0x08` until `eink_rx_bytes` reads 30000, closes
-that gap. See [`BLE_CRASH_DIAGNOSIS.md`](BLE_CRASH_DIAGNOSIS.md) §2.
+The client is self-verifying: the firmware keeps a per-chunk receipt bitmap
+(`eink_chunk_map[16]`, one bit per 240-byte chunk) and command `0x08` notifies it, so
+`upload_noresp.py` re-sends only the chunks that were actually dropped. Loss is a
+**contiguous band, not just the tail**, which is why the old byte counter was not good
+enough — see [`BLE_CRASH_DIAGNOSIS.md`](BLE_CRASH_DIAGNOSIS.md) §2b.
+
+The panel is only touched if you pass `--refresh`; routine uploads leave it alone.
+
+```bash
+# Upload and verify, without redrawing the panel (fast):
+./venv/bin/python upload_noresp.py --image test_pattern_red_400x300.png
+
+# Upload, verify, then actually redraw the panel (adds ~17 s):
+./venv/bin/python upload_noresp.py --image test_pattern_red_400x300.png --refresh
+```
 
 ### Ensure Bluetooth is Active
 ```bash
@@ -212,7 +222,7 @@ sudo rfkill unblock bluetooth
 
 > Steps 2–4 use Write With Response and are affected by the open bug above. Treat the
 > throughput and "acknowledged" messages from `ble_eink_client.py` as unreliable until
-> it is fixed.
+> it is fixed — prefer `upload_noresp.py`.
 
 ---
 

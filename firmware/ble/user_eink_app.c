@@ -52,6 +52,18 @@ uint8_t eink_framebuffer[30000];
 /// Bytes received so far into eink_framebuffer (for status reporting)
 uint16_t eink_rx_bytes;
 
+/// Receipt bitmap, one bit per EINK_CHUNK_SIZE-byte chunk.
+///
+/// This exists because a naive byte counter is not enough to make an upload
+/// self-verifying. ATT Write Without Response has no link-layer retransmission, so
+/// the host can outrun this device and have whole chunks silently dropped. Measured
+/// on this board, the loss is a *contiguous suffix run* whose length grows with how
+/// hard the host pushes: ~30 chunks lost at 15 ms/packet, ~57 at 5 ms/packet. Because
+/// eink_rx_bytes only accumulates, a large value looks "nearly complete" while a band
+/// of the image in the middle is missing. A per-chunk bitmap lets the host re-send
+/// exactly the gaps instead of guessing.
+uint8_t eink_chunk_map[EINK_CHUNK_MAP_BYTES];
+
 
 /* ─── user_app_init ──────────────────────────────────────────────────────── */
 
@@ -174,16 +186,20 @@ void user_eink_cmd_wr_handler(ke_msg_id_t const msgid,
             eink_framebuffer[i + 15000] = 0x00; // Red plane: non-red
         }
         eink_rx_bytes = 0;
+        memset(eink_chunk_map, 0, sizeof(eink_chunk_map));
         diag_snapshot(DIAG_PHASE_CMD_CLEAR);
         diag_set_count(eink_rx_bytes);
         break;
 
     case 0x08:
-        // Status query: reply with bytes received so far (2-byte notify)
+        // Status query: notify the chunk-receipt bitmap (16 B) followed by the
+        // 2-byte byte counter, so the host can re-send exactly the chunks that were
+        // dropped. A scalar counter is not enough - see eink_chunk_map.
         {
-            uint8_t rsp[2];
-            rsp[0] = eink_rx_bytes & 0xFF;
-            rsp[1] = (eink_rx_bytes >> 8) & 0xFF;
+            uint8_t rsp[EINK_CHUNK_MAP_BYTES + 2];
+            memcpy(rsp, eink_chunk_map, EINK_CHUNK_MAP_BYTES);
+            rsp[EINK_CHUNK_MAP_BYTES]     = eink_rx_bytes & 0xFF;
+            rsp[EINK_CHUNK_MAP_BYTES + 1] = (eink_rx_bytes >> 8) & 0xFF;
             struct custs1_val_ntf_ind_req *ntf_req =
                 KE_MSG_ALLOC_DYN(CUSTS1_VAL_NTF_REQ,
                                  prf_get_task_from_id(KE_BUILD_ID(TASK_ID_CUSTS1,
@@ -235,6 +251,16 @@ void user_eink_data_wr_handler(ke_msg_id_t const msgid,
 
     memcpy(&eink_framebuffer[offset], &param->value[2], data_len);
     eink_rx_bytes += data_len;
+
+    // Record receipt per chunk. A chunk counts as received only if the write landed
+    // exactly on a chunk boundary with the full payload, so a truncated or
+    // misaligned write cannot mark data as good.
+    if ((offset % EINK_CHUNK_SIZE) == 0) {
+        uint16_t idx = (uint16_t)(offset / EINK_CHUNK_SIZE);
+        if (idx < EINK_CHUNK_COUNT) {
+            eink_chunk_map[idx >> 3] |= (uint8_t)(1u << (idx & 7));
+        }
+    }
 }
 
 /* ─── Catch-All Handler ──────────────────────────────────────────────────── */
