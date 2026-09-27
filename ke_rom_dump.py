@@ -27,13 +27,13 @@ KE_HEAP_USED_OFF = 0x54      # offset of heap_used[] (uint16 each)
 
 MBLOCK_MAGIC = 0xA55A        # free-block marker, seen in every block header
 
-# Heap payload regions, derived from the linker map (see regen_diag_regions.py).
-HEAP_REGIONS = [
-    ("env",    0x07FD4D84, 0x07FD4FF8),
-    ("db",     0x07FD4FF8, 0x07FD5404),
-    ("msg",    0x07FD5404, 0x07FD5B80),
-    ("nonret", 0x07FCECBC, 0x07FCF0C8),
-]
+# Each retained heap block is an 8-byte mblock header (magic, size, next) padded to
+# 12 bytes in the section, so the block spans payload + 12. The free-list bounds are
+# derived from ke_env's heap[] pointers and heap_size[] at run time, NOT hardcoded:
+# they shift between builds because MSG_HEAP_SZ is #if !EINK_DIAG, and hardcoded
+# bounds silently walk the wrong memory on a differently-configured build.
+HEAP_NAMES = ["env", "db", "msg", "nonret"]
+MBLOCK_OVERHEAD = 12
 
 
 def connect():
@@ -84,15 +84,17 @@ def decode_heaps(target):
     print("  queue_saved.next = 0x%08X" % words[1])
     print("  queue_timer.next = 0x%08X" % words[2])
 
+    regions = []
     for i in range(KE_MEM_BLOCK_MAX):
         ptr = words[KE_HEAP_ARRAY_OFF // 4 + i]
         size = struct.unpack_from("<H", raw, KE_HEAP_SIZE_OFF + 2 * i)[0]
         used = struct.unpack_from("<H", raw, KE_HEAP_USED_OFF + 2 * i)[0]
-        name = next((n for n, lo, hi in HEAP_REGIONS if lo <= ptr < hi), "?")
+        name = HEAP_NAMES[i] if i < len(HEAP_NAMES) else f"heap{i}"
+        regions.append((name, ptr, ptr + size + MBLOCK_OVERHEAD))
         print(f"  heap[{i}] = 0x{ptr:08X}  ({name:<6}) payload={size:5d}  free={size-used:5d}")
     print()
 
-    for name, lo, hi in HEAP_REGIONS:
+    for name, lo, hi in regions:
         print(f"{name} free list, 0x{lo:08X}..0x{hi:08X} ({hi-lo} B):")
         node, broken, n = lo, False, 0
         while n < 64:

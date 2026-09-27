@@ -239,6 +239,14 @@ sudo rfkill unblock bluetooth
 > Steps 2–4 use Write With Response and are affected by the open bug above. Treat the
 > throughput and "acknowledged" messages from `ble_eink_client.py` as unreliable until
 > it is fixed — prefer `upload_noresp.py`.
+>
+> **Update 2026-09-28 (step zero):** the Write-With-Response failure is
+> build-configuration dependent and **does not reproduce on the shipping build**
+> (`EINK_DIAG=0`, 3/3 clean); it fails 2/2 on `EINK_DIAG=1`. `ble_eink_client.py` is
+> still not recommended — the bitmap-verified `upload_noresp.py` path remains the correct
+> one — but the reason is now "unverified/unreliable ACK semantics", not "known crash on
+> the shipped firmware". Use `stepzero_write_req.py` to re-test; it refuses command `0x06`
+> so it cannot refresh the panel.
 
 ---
 
@@ -270,6 +278,7 @@ sudo rfkill unblock bluetooth
 ├── BLE_CRASH_DIAGNOSIS.md         # Memory-budget + HardFault findings (READ FIRST)
 ├── ble_eink_client.py             # Python Bleak wireless image upload client
 ├── upload_noresp.py               # Working uploader (Write Without Response)
+├── stepzero_write_req.py          # Panel-safe Write-Request repro + heap walk
 ├── repro_disconnect.py            # Deterministic mid-refresh crash reproducer
 ├── diag_crc.py                    # Retained RAM-CRC snapshot differ (SWD)
 ├── regen_diag_regions.py          # Regenerate diag region table from the linker map

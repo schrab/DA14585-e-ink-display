@@ -304,20 +304,26 @@ heap cannot grow further without shrinking the framebuffer.
    then reset the board. Fixed by `#define MSG_HEAP_SZ (1904)` in `user_config.h`.
    **Do not reduce this value.**
 
-1. **OPEN — HardFault on any ATT Write Request.** Write *with* response (`response=True`)
-   faults in the ROM's `ke_queue_insert` (`blx r5` @ `0x07F1BDDA`, LR `0x07F1BDDD`), which
-   dispatches a garbage handler `0x50001500` = `GP_ADC_CTRL_REG`. Root cause is
-   **undetermined, and parked**: whether the crash-site header (`msgid=0x0101`, `dest=1`,
-   `src=0xFF`) is an emitted message or a freed block decoded as a header cannot be decided
-   from its own fields — msgid bytes identify the defining module and enum index, not dest/src,
-   so there is no consistency relation to check. Two readings have been written and retracted
-   on exactly this mistake (the second time, the *retraction* cited a `KE_MSG_ID` macro that
-   does not exist). Do not restart the investigation from either framing, and do not propose
-   send-time logging or a free-list poll: both are recorded as dead ends in
-   [`BLE_CRASH_DIAGNOSIS.md`](BLE_CRASH_DIAGNOSIS.md) §2. Write *without* response works.
-   **Use Write Without Response until this is fixed; do not attempt a ROM patch** (the
-   `PATCH_ADDR` controller redirects instruction fetches, not message fields, and all 22
-   registers measure their reset value).
+1. **OPEN, but does not reproduce in production — HardFault/hang on ATT Write Request.**
+   Write *with* response (`response=True`) was believed to fault in the ROM's
+   `ke_queue_insert` (`blx r5` @ `0x07F1BDDA`, LR `0x07F1BDDD`), which
+   dispatches a garbage handler `0x50001500` = `GP_ADC_CTRL_REG`.
+   **Step zero (2026-09-28) narrows this sharply:** the failure is build-configuration
+   dependent. On `EINK_DIAG=0` (the shipping build, `MSG_HEAP_SZ=1904`) a 1-byte
+   write-with-response succeeds **3/3**; on `EINK_DIAG=1` (1392 B pool) it fails **2/2**,
+   and there it presents as a *hang* (`IPSR=0`, `CFSR=0`, advertising stops) rather than
+   the HardFault above. Root cause remains undetermined; the two builds differ in more than
+   pool size, so size is **not** established as the cause. Write *without* response works in
+   both. **Use Write Without Response; do not attempt a ROM patch** (the `PATCH_ADDR`
+   controller redirects instruction fetches, not message fields, and all 22 registers
+   measure their reset value). Do not restart the investigation from either retired
+   framing — whether the crash-site header is an emitted message or a freed block decoded
+   as a header cannot be decided from its own fields, since msgid bytes identify the
+   defining module and enum index, not dest/src. Two readings have been written and
+   retracted on exactly this mistake (the second time, the *retraction* cited a `KE_MSG_ID`
+   macro that does not exist in the SDK). Do not propose send-time logging or a free-list
+   poll: both are recorded as dead ends in
+   [`BLE_CRASH_DIAGNOSIS.md`](BLE_CRASH_DIAGNOSIS.md) §2.
 
 2. **FIXED — silent chunk loss.** Write Commands have no link-layer retransmission, so the
    host outruns the peripheral and chunks are dropped. This is a **contiguous band, not
@@ -330,8 +336,14 @@ heap cannot grow further without shrinking the framebuffer.
 * `make flash` needs `PYTHON=../venv/bin/python` (bare `python3` has no `pyocd`).
 * The Makefile has **no header dependency tracking** — `make clean` after editing any
   `-include`d config header.
-* A faulted board stops advertising (`HardFault_HandlerC` halts with
-  `CFG_DEVELOPMENT_DEBUG`). Recover with `./venv/bin/python reboot_target.py`.
+* A faulted or wedged board stops advertising. Recover with
+  `./venv/bin/python reboot_target.py`.
+* **Always label heap/KE numbers with the build that produced them.** `MSG_HEAP_SZ` is
+  `#if !EINK_DIAG`, so the retained layout differs between builds. `ke_rom_dump.py --heaps`
+  now derives free-list bounds from `ke_env` at run time; before that it used
+  `EINK_DIAG=0` addresses hardcoded and reported healthy `EINK_DIAG=1` heaps as `BROKEN`.
+* `stepzero_write_req.py` is the panel-safe reproducer for the Write-Request question: it
+  sends one small command and refuses `0x06` so it cannot refresh the display.
   `IPSR`: `0` healthy, `2` NMI/watchdog, `3` HardFault.
 
 ---

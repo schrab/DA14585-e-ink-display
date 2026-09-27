@@ -94,6 +94,14 @@ comparing against the host-side conversion — **no display refresh involved**.
 
 ## 2. Open: HardFault on any ATT Write Request (with response)
 
+> **Status update (2026-09-28, fourth revision — supersedes the third).** The step-zero
+> experiment has now been run (see *Step zero* below). The write-with-response failure
+> **does not reproduce on the production build** (`EINK_DIAG=0`, `MSG_HEAP_SZ=1904`): 3/3
+> clean. It fails 2/2 on `EINK_DIAG=1` (1392 B pool), where it presents as a *hang*, not
+> the HardFault analysed below. Root cause still undetermined; the fix status is unchanged
+> (use Write Without Response), but the open question is now scoped to a build we do not
+> ship.
+>
 > **Status update (2026-09-28, third revision — supersedes the second).** Two claims that
 > were written into this document as settled are now **withdrawn**:
 >
@@ -653,12 +661,68 @@ All of the referenced artifacts are available and were re-verified in this check
 `~/DA145xx_SDK/6.0.24.1464`, and a live SWD target. The addresses cited throughout §2
 (`0x07F1BDDA`, `0x07F11956`, `0x07F10B54`, the heap bounds) can be re-checked here at any time.
 
-**Step zero, cheap and local, before anything else:** re-run the single-1-byte-write repro and
-the `ke_env` heap walk in *both* `EINK_DIAG=0` and `EINK_DIAG=1`, and label every number with its
-build. If the HardFault does not reproduce on the `EINK_DIAG=0` build, then the whole §2 question
-was an artefact of the diagnostic build's smaller pool plus retained-RAM pressure, and the search
-ends there. That test has apparently never been recorded as run, and it is the only remaining
-experiment that this repo can actually perform.
+**Step zero — RUN 2026-09-28. Result: the fault does NOT reproduce on the production build.**
+
+The test below was re-run in both configurations, one 1-byte write of command `0x08`
+(status query; no panel side effect) to the command characteristic, never sending `0x06`.
+Reproducer: `stepzero_write_req.py` (`--cmd`, `--noresp`, `--heaps`).
+
+Pool size was read out of each built ELF rather than assumed:
+
+| Build | `rwip_heap_msg_ret` in ELF | msg payload (`heap_size[2]`) |
+|---|---|---|
+| `EINK_DIAG=0` | `0x77c` = 1916 B (1904 + 12 B mblock) | **1904** |
+| `EINK_DIAG=1` | `0x57c` = 1404 B (1392 + 12 B mblock) | **1392** |
+
+| Test | `EINK_DIAG=0` (1904 B) | `EINK_DIAG=1` (1392 B) |
+|---|---|---|
+| write **with** response | **OK, 3/3 runs** | **fails, 2/2 runs** |
+| write *without* response (control) | OK | OK, on the same boot |
+| free lists after | all 4 consistent | all 4 consistent |
+| `env` heap free | 444 / 616 | 32 / 616 |
+
+`EINK_DIAG=0` with response: the write returned, the link stayed up, the core stayed in
+BLE low-power sleep (`PC=0x07FC1304`, `SP=0x07FCF8D0`, unchanged across runs), and all
+four free lists were consistent — 3/3.
+
+`EINK_DIAG=1` with response: the ATT layer returned error `0x0E` (*Unlikely Error*) and
+the board then **stopped advertising and hung**. On a single boot the control
+(write *without* response) succeeded and the very next write *with* response killed it, so
+the failure is isolated to `response=True` and is not a timing artefact of the connection.
+
+Two corrections to the record that this test forced:
+
+1. **It is a hang, not a HardFault.** In the `EINK_DIAG=1` runs `IPSR=0x00`, `CFSR=0`,
+   `HFSR=0`, `DFR=0` — thread mode, no fault recorded — with `PC=0x07FC1E5C` and
+   `LR=0xFFFFFFF9` held steady. So the signature reproduced here is a wedged stack that
+   stops advertising, **not** the `ke_queue_insert` HardFault at `0x07F1BDDA` documented
+   above. Whether that older HardFault is a *different* failure or a later stage of this
+   one is not established; do not treat this run as a reproduction of it.
+2. **`ke_rom_dump.py --heaps` was reporting false corruption.** Its free-list bounds were
+   hardcoded from the `EINK_DIAG=0` linker map, so on the `EINK_DIAG=1` build it walked
+   the wrong memory and printed all four lists as `BROKEN`. The heaps are in fact
+   **consistent** on both builds. Bounds are now derived at run time from `ke_env`'s
+   `heap[]` / `heap_size[]` (`pointer .. pointer + payload + 12`). This is a direct
+   instance of the failure mode the build caveat warned about — an unlabelled number read
+   as evidence. **Never walk these heaps without recording the build.**
+
+### What this does and does not establish
+
+* **Established:** the write-with-response failure is *build-configuration dependent* and
+  does not occur on the shipping configuration. Continue to use Write Without Response;
+  nothing about the production path needs to change.
+* **Not established:** that the message heap *size* is the cause. `EINK_DIAG=0` and
+  `EINK_DIAG=1` differ in more than pool size — the `user_eink_diag.c` code is compiled in
+  and the whole retained-region layout shifts (e.g. msg heap moves
+  `0x07FD5404` → `0x07FD564C`) — so this is a 1-bit comparison, n=2 vs n=3, not a
+  controlled one. The `env` heap is also nearly exhausted on `EINK_DIAG=1` (32 B free of
+  616), which is a plausible alternative contributor and was not separated out.
+* **Decisive follow-up if anyone resumes:** build a third configuration that keeps
+  `EINK_DIAG=1` but forces `MSG_HEAP_SZ (1904)` unconditionally. That isolates pool size
+  from the rest of the diagnostic build in one flash.
+
+**The recommendation to park this stands**, and is now better founded: the failure does
+not reproduce in the build we actually ship.
 
 **Beyond that**, moving this requires evidence this repo cannot generate: a second board
 for A/B comparison (isolate firmware-state effects from silicon errata), or a Renesas erratum
