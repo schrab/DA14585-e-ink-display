@@ -414,63 +414,42 @@ and fast. Ghidra remains installed and the project is at `/tmp/opencode/ghidra_p
 any deeper decompilation.
 
 
-### ROOT CAUSE FOUND: `atts_write_rsp_send` passes an uninitialised `r0`
+### RETRACTED: the "uninitialised r0 in atts_write_rsp_send" claim was wrong
 
-A brute-force scan for `bl` encodings across all 128 KB of ROM (4272 sites, independent of
-function boundaries) finds exactly **13 call sites** each for `atts_allocate_pdu`
-(`0x07F11956`) and `atts_send_pdu` (`0x07F11978`). Four logical functions contain them:
-`atts_send_error`, `atts_send_event`, **`atts_write_rsp_send`**, and a cluster of unnamed
-static helpers after `0x07F10B74` (which is why naive symbol attribution dumps 10 of the 13
-into `atts_mtu_exc_req` — it is simply the first symbol in that cluster, and `atts_handlers`
-at `0x07F1EDB0` is an interleaved `(msg_id, handler)` table).
+An earlier revision of this document claimed the root cause was `atts_write_rsp_send`
+failing to set `r0` before calling `atts_allocate_pdu`. **That claim is retracted.** It was
+overclaimed, and three checks refute it:
 
-`atts_write_rsp_send` is the ATT Write Response sender, and it is 30 bytes:
+1. **`r0` is not an uninitialised register.** `atts_write_rsp_send` takes `(r0, r1, r2)`; it
+   uses `r2` as an error flag (`cmp r2, #0`) and forwards `r0` to `atts_allocate_pdu`. That is
+   an ordinary three-argument function. Mistaking "the callee does not reassign r0" for "r0
+   is uninitialised" was simply a misreading.
+2. **The ATTS dispatcher does populate `r0` before indirect calls.** The handler loop at
+   `0x07F1177E` reads the incoming ATT opcode, matches it against `atts_handlers[]`
+   (`(msg_id, handler)` pairs, stride 8), loads the handler into `r5`, and sets `r0` from
+   `[sp, #4]` (the caller's stack slot) before `blx r5` at `0x07F117D8`.
+3. **`atts_write_rsp_send` (`0x07F10B54`) has no callers at all.** A brute-force scan of every
+   `bl` and `b` encoding in all 128 KB of ROM finds zero branches targeting it, and neither a
+   32-bit nor a 16-bit function-pointer table entry refers to it. It is most likely **dead
+   code in the mask ROM**, which makes it an implausible crash path.
 
-```asm
-7f10b54:  push  {r4, lr}
-7f10b56:  cmp   r2, #0
-7f10b58:  beq   0x7f10b66           ; success path
-7f10b5a:  mov   r3, r2
-7f10b5c:  mov   r2, r1
-7f10b5e:  movs  r1, #18
-7f10b60:  bl    0x07f109fc           ; atts_send_error
-7f10b64:  pop   {r4, pc}
-7f10b66:  movs  r2, #0              ; --- SUCCESS PATH ---
-7f10b68:  movs  r1, #19
-7f10b6a:  bl    0x07f11956           ; atts_allocate_pdu(r0 = NEVER SET, 19)
-7f10b6e:  bl    0x07f11978           ; atts_send_pdu
-7f10b72:  pop   {r4, pc}
-```
+**What is actually established** about the ATT transmit path:
 
-**`r0` is never written on the success path** — it is inherited from the caller. And
-`atts_allocate_pdu` derives the message's task IDs *from* `r0`:
+* `atts_allocate_pdu` (`0x07F11956`) and `atts_send_pdu` (`0x07F11978`) each have exactly
+  **13 call sites**, in `atts_send_error`, `atts_send_event`, and a cluster of unnamed static
+  helpers after `0x07F10B74` (dispatched through `atts_handlers[]`).
+* `atts_send_pdu` is a 10-byte wrapper: `subs r0, r0, #6` then `ke_msg_send`. That offset
+  round-trips correctly against `atts_allocate_pdu`'s `adds r0, r0, #6` and `ke_msg_alloc`
+  returning `block + 12` — verified, not a bug.
+* `ke_msg_send` itself has 16 call sites in 12 functions, of which the ATT transmit helpers
+  are two, and the rest are L2CAP, Security Manager, error events, MTU exchange and the two
+  forward helpers.
 
-```asm
-7f1195a:  lsls  r1, r0, #8          ; r1 = (r0 << 8) + 6   -> dest_id
-7f11960:  mov   r2, r1
-7f11964:  adds  r2, #8              ; r2 = (r0 << 8) + 8   -> src_id
-7f1195c:  adds  r2, #72             ; r3 = 72 + 19 = 91    -> param_len
-7f1196a:  bl    0x07f1bbb0          ; ke_msg_alloc(id=0x0A00, dest, src, 91)
-```
-
-So this is the single point where a bogus **destination and source task ID** enter the
-`ATT_WRITE_RSP` message. That is exactly the shape of the observed fault, whose message
-carried `msgid=0x0101`, `dest_id=0x0001`, `src_id=0x00FF` — task-ID fields naming no task
-that exists in this build — and the ROM's `ke_queue_insert` then resolved a handler for a
-nonexistent task and branched into `0x50001500`.
-
-**Chain:** `atts_handlers[]` -> `atts_write_rsp_send` -> `atts_allocate_pdu` ->
-`atts_send_pdu` -> `ke_msg_send` -> `ke_queue_insert` -> `blx r5` -> HardFault.
-
-**Not determined:** whether the dispatcher always sets `r0` before calling
-`atts_write_rsp_send`. If it does, `r0 = 0` gives `dest = 6` and `src = 8`, which is still
-not a valid task pair for a write response, so the path is suspect either way. Confirming
-this needs either a Renesas erratum or a Ghidra decompile of the ATTS dispatcher, which
-would establish the real calling convention.
-
-**Consequence for us:** the defect is in mask ROM, which cannot be patched. Write Without
-Response plus the per-chunk receipt bitmap (§2b) remains the correct engineering path, and
-now rests on a known ROM defect rather than an unexplained crash.
+**Still open:** which of those call sites produces the observed message
+(`msgid=0x0101`, `dest=0x0001`, `src=0x00FF`, `param_len=0`) whose block the allocator
+considers free. The next step is to determine the ATTS calling convention properly - i.e.
+decompile the `atts_handlers[]` dispatch loop and the handler it selects for an
+`ATT_WRITE_REQ` (opcode `0x12`) - rather than reasoning from one call site in isolation.
 
 
 ---
