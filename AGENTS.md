@@ -302,7 +302,12 @@ heap cannot grow further without shrinking the framebuffer.
    pool (`rwip_heap_msg_ret`) to 1392 B. Streaming 30 KB at MTU 247 (~250 B per message)
    exhausted it, and the allocator returned blocks overlapping freed ones — the watchdog
    then reset the board. Fixed by `#define MSG_HEAP_SZ (1904)` in `user_config.h`.
-   **Do not reduce this value.**
+   **Do not reduce this value** — but note it is kept at 1904 on *precaution*, not because
+   1904 is proven necessary. With the pool at 1392 B and the CRC stall absent the board
+   streams all 30 KB in one pass, so the original failure may have been the stall piling
+   up messages rather than an undersized pool. Counter-evidence is n=1; see
+   [`BLE_CRASH_DIAGNOSIS.md`](BLE_CRASH_DIAGNOSIS.md) §1 · *Counter-evidence on the pool
+   size*. Reverting needs repeated full-stream runs, not a single pass.
 
 1. **ROOT-CAUSED (2026-09-28) — ATT Write Request failure was self-inflicted.**
    Write *with* response (`response=True`) failed on `EINK_DIAG=1` only: host saw ATT

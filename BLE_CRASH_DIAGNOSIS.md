@@ -90,6 +90,35 @@ so `MSG_HEAP_SZ` cannot grow much further without shrinking the framebuffer.
 `ip_src/../check` of the framebuffer was done by reading `eink_framebuffer` over SWD and
 comparing against the host-side conversion — **no display refresh involved**.
 
+### Counter-evidence on the pool size (2026-09-28)
+
+**The stated justification for 1904 B is weaker than it was when written, and should not
+be read as a settled sizing decision.** The original reasoning was that a 30 KB stream at
+~250 B per message needs more than the SDK's 1392 B. That is now contradicted by a direct
+test: with the pool at **1392 B and the CRC stall absent**, the board streamed the full
+30,000 bytes / 125 chunks in a single pass, all 125 confirmed, no fault (see §2 ·
+*Is the HardFault a second manifestation of the CRC stall?*, "stall off" row).
+
+So the §1 failure may have been **the CRC stall piling up messages**, not an undersized
+pool — the 1904 B would then have been raising the waterline above a stall-induced pile-up
+rather than fixing a sizing error. Consistent with that: the stall is now root-caused as
+our own `diag_snapshot()` CRC pass running inside the KE write handler (§2), and
+`EINK_DIAG=0` never had it because the diagnostics are not compiled into that build at
+all.
+
+This cannot be settled on one board, and it does not need to be settled to be recorded.
+
+**`MSG_HEAP_SZ` stays at 1904 on precautionary grounds, not because 1904 is proven
+necessary:**
+
+* The counter-evidence is n=1 session, one pass. §1 was an *observed* watchdog reset.
+  One clean run does not outweigh that.
+* The 512 B would move retained slack from 128 B to ~640 B — still not a comfortable
+  budget, and it does not enable anything currently blocked.
+
+**What would justify reverting to 1392:** repeated full-stream sessions on the shipping
+build, ideally with a second client or sustained load, all clean. Not a single pass.
+
 ---
 
 ## 2. Open: HardFault on any ATT Write Request (with response)
