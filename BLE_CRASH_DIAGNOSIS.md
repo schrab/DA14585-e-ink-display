@@ -71,15 +71,44 @@ so `MSG_HEAP_SZ` cannot grow much further without shrinking the framebuffer.
 > overflows by ~456 B). That is deliberate and correct for linking, but it means a diagnostic
 > build is **not** testing the fixed heap. Any experiment whose result depends on pool size must
 > say which build it ran in — see §2 · "Build caveat that invalidates several negative results".
-> (§1's verification table above does not state its build; the crash-path evidence in §2 was
-> captured with `EINK_DIAG=1`, so the two may not describe the same pool. Worth pinning down.)
+>
+> **RESOLVED (2026-09-28) — the verification table below is confounded, and by
+> construction.** Traced to the primary source, commit `b103e7a`, which introduced
+> `user_eink_diag.c` as a *new file* and enlarged the pool in the same commit. Its message
+> states: *"The 512 B came from making the new diagnostics compile-time optional."*
+>
+> | | msg pool | `user_eink_diag.c` | CRC stall |
+> |---|---|---|---|
+> | **Before** | 1392 B (SDK default) | compiled in | **present** |
+> | **After** | 1904 B | compiled out | **absent** |
+>
+> So the before/after delta changes **two** variables, and they were *mechanically* coupled:
+> the 512 B that made the larger pool possible came from dropping the diagnostics that
+> contained the stall. The table therefore does **not** isolate pool size.
+>
+> Two things keep this from undermining the fix itself:
+>
+> * The signatures differ. §1 is a watchdog NMI (`IPSR=2`) with the allocator returning
+>   overlapping blocks; the §2 stall failure is a *hang* (`IPSR=0`, `CFSR=0`, ATT `0x0E`,
+>   advertising stops). The stall does not produce the NMI — that was measured directly in
+>   §2 · *Is the HardFault a second manifestation of the CRC stall?*. So §1's NMI remains
+>   a real, unexplained-once-removed finding, and the board no longer resets.
+> * What is genuinely unproven is the *sufficiency* claim: that 1904 B alone is enough.
+>   Every "after" observation was taken on a build that also lacked the stall.
+>
+> **This cannot be separated on the current hardware** without finding 512 B of retained
+> RAM to fund a 1392 B pool *with* the diagnostics linked — which is the same budget
+> problem that forces the two to be coupled. See *Counter-evidence on the pool size* below.
 
 512 bytes were freed by making the diagnostics compile-time optional
 (`EINK_DIAG=0` is now the Makefile default; see §4).
 
 ### Verification
 
-| Metric | Before | After |
+Both columns are labelled by build. **Neither is a single-variable comparison** — see the
+caveat above.
+
+| Metric | Before (`EINK_DIAG=1`-equivalent: 1392 B + stall) | After (`EINK_DIAG=0`: 1904 B, no stall) |
 |---|---|---|
 | 30 KB stream | NMI / reset | **76.9 KB/s, clean** |
 | `IPSR` after stream | 2 | **0** |

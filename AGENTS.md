@@ -308,6 +308,11 @@ heap cannot grow further without shrinking the framebuffer.
    up messages rather than an undersized pool. Counter-evidence is n=1; see
    [`BLE_CRASH_DIAGNOSIS.md`](BLE_CRASH_DIAGNOSIS.md) §1 · *Counter-evidence on the pool
    size*. Reverting needs repeated full-stream runs, not a single pass.
+   **The original before/after evidence is confounded and labelled as such:** both the
+   diagnostics and the pool change landed in the same commit (`b103e7a`), and the pool's
+   512 B was funded by dropping the diagnostics. So every "after" run also lacked the CRC
+   stall. The NMI signature is genuinely distinct from the §2 hang, so the fix stands; the
+   *sufficiency* of 1904 B is unproven.
 
 1. **ROOT-CAUSED (2026-09-28) — ATT Write Request failure was self-inflicted.**
    Write *with* response (`response=True`) failed on `EINK_DIAG=1` only: host saw ATT
