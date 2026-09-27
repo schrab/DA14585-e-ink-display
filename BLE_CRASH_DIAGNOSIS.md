@@ -59,8 +59,20 @@ so `MSG_HEAP_SZ` cannot grow much further without shrinking the framebuffer.
 `firmware/ble/config/user_config.h`:
 
 ```c
+/* firmware/ble/config/user_config.h — note the guard, see caveat below */
+#if !EINK_DIAG
 #define MSG_HEAP_SZ  (1904)   /* was 1392 */
+#endif
 ```
+
+> **Caveat on this fix's scope (found while re-checking §2).** The enlarge is compiled in only
+> for non-diagnostic builds: `EINK_DIAG=1` silently falls back to the SDK default 1392-byte pool,
+> because the ~650 bytes of retained CRC history do not fit alongside it (`LR_RETAINED_RAM0`
+> overflows by ~456 B). That is deliberate and correct for linking, but it means a diagnostic
+> build is **not** testing the fixed heap. Any experiment whose result depends on pool size must
+> say which build it ran in — see §2 · "Build caveat that invalidates several negative results".
+> (§1's verification table above does not state its build; the crash-path evidence in §2 was
+> captured with `EINK_DIAG=1`, so the two may not describe the same pool. Worth pinning down.)
 
 512 bytes were freed by making the diagnostics compile-time optional
 (`EINK_DIAG=0` is now the Makefile default; see §4).
@@ -82,14 +94,43 @@ comparing against the host-side conversion — **no display refresh involved**.
 
 ## 2. Open: HardFault on any ATT Write Request (with response)
 
-> **Status update (2026-09-28, second revision).** The §2 "Fault record" header below was
-> long read as a genuine LLC message; the low-byte check in
-> [§2 · Independent check](#independent-check-before-that-decompile-the-msgid-cannot-be-an-att-or-llc-message)
-> shows it is self-inconsistent (`KE_MSG_ID(0x0001, 0x00FF)` = `0x01FF`, not `0x0101`), so
-> the crash-site header is most likely garbage from a freed block rather than an emitted
-> message. That reframes the open question from "which ATT call site sent this" to "why did
-> the retained msg heap hand out that block". Root cause still open; decision recorded
-> there: live with it, do not patch the ROM.
+> **Status update (2026-09-28, third revision — supersedes the second).** Two claims that
+> were written into this document as settled are now **withdrawn**:
+>
+> 1. *the original* "this is a valid LLC message, the ROM just had no handler" reading, and
+> 2. *the retraction of it*, which argued the header was provably garbage because it failed
+>    a `KE_MSG_ID(dest, src)` consistency check.
+>
+> **Neither holds.** There is no `KE_MSG_ID` macro in the SDK at all. Caveat on how that was
+> established, stated plainly because it matters: the SDK headers are not vendored into this
+> repo, so it could not be checked against `ke_msg.h` offline. What *is* verifiable here is that
+> the name occurs nowhere except our own markdown, and that `firmware/ble/user_eink_app.c:205` —
+> the one place our code builds a msgid — uses `KE_BUILD_ID`. Combined with your report that the
+> real primitives are `KE_BUILD_ID`/`KE_FIRST_MSG`/`MSG_T`/`MSG_I`, the conclusion follows; but it
+> rests on your reading of an SDK header I cannot open, not on a check I performed.
+> Under the real primitives, the low byte of a msgid is the **message index within the
+> defining module's enum**, not `src_id`.
+> Message ids are globally unique by defining module and carry **no** dest/src information,
+> so neither `msgid & 0xFF == src & 0xFF` nor `MSG_T(msgid) == dest & 0xFF` is a rule the
+> SDK enforces. Both candidate validators are refuted by a message we know was handled
+> correctly, logged off the device by `diag_observe()`:
+>
+> ```
+> msgid=0xFD0A  dest=0x0004  src=0x0011  handle=0x0002  length=1  b0=0x07  → CMD
+>   msgid & 0xFF = 0x0A   vs   src  & 0xFF = 0x11   → differ
+>   MSG_T(msgid) = 0xFD   vs   dest & 0xFF = 0x04   → differ
+> ```
+>
+> That message produced the `CMD_CLEAR` snapshot and the clear demonstrably took effect, so
+> it is ground truth for a *valid* message — and it satisfies neither rule.
+>
+> **Consequence: the fault record can be neither validated nor invalidated from its own
+> fields.** It is genuinely undetermined whether `0x0101 / 0x0001 / 0x00FF` is an emitted
+> message or a freed block decoded as a header. The investigation is blocked on evidence, not
+> on analysis — every experiment proposed across the last three revisions is now recorded as a
+> dead end, together with what would actually be needed to resume
+> ([§2 · Dead ends](#dead-ends-why-no-further-experiment-in-this-repo-can-settle-it)).
+> Decision unchanged: **live with it, do not patch the ROM.**
 
 ### Symptom
 
@@ -133,9 +174,15 @@ address escalates to HardFault with `CFSR = 0`, which matches the all-zero fault
 
 The containing ROM symbol is `ke_queue_insert`. The handler signature is
 `int (*ke_msg_func_t)(ke_msg_id_t msgid, void const *param, ke_task_id_t dest, ke_task_id_t src)`,
-so `r0 = 0x0101` is the **message id**. `KE_FIRST_MSG(task) = task << 8`, so `0x0101`
-means task type 1 (`TASK_ID_LLC`), message 1 — and `dest_id = 0x0001` agrees. The message
-is self-consistent; the ROM simply had no valid handler and fell through to garbage.
+so `r0 = 0x0101` is the **message id**.
+
+> ⚠️ **Withdrawn reading (2026-09-28).** This paragraph originally continued "`KE_FIRST_MSG(task)
+> = task << 8`, so `0x0101` means task type 1 (`TASK_ID_LLC`), message 1 — and `dest_id = 0x0001`
+> agrees; the message is self-consistent". That inference is **retracted**: msgid high/low bytes
+> identify the *defining module* and the *index within its enum*, not dest/src, so "agrees" was a
+> coincidence with no evidential weight. See the status block at the head of §2. What *is* solid
+> here is independent of it: the register values, the exact `LR` match on the disassembly, and
+> the fact that `r5` held a non-executable peripheral address.
 
 The faulting message's 12 bytes are immediately followed by `0x0048A55A`, the KE
 free-block magic, so this looks like the *same* allocator-overlap weakness as §1 reached
@@ -454,82 +501,177 @@ overclaimed, and three checks refute it:
   are two, and the rest are L2CAP, Security Manager, error events, MTU exchange and the two
   forward helpers.
 
-**Still open:** which of those call sites produces the observed message
-(`msgid=0x0101`, `dest=0x0001`, `src=0x00FF`, `param_len=0`) whose block the allocator
-considers free. The next step is to determine the ATTS calling convention properly - i.e.
-decompile the `atts_handlers[]` dispatch loop and the handler it selects for an
-`ATT_WRITE_REQ` (opcode `0x12`) - rather than reasoning from one call site in isolation.
+**Was listed as the next step, now cancelled:** *"which of those call sites produces the
+observed message (`msgid=0x0101`, `dest=0x0001`, `src=0x00FF`, `param_len=0`), i.e. decompile
+the `atts_handlers[]` dispatch loop and follow the handler selected for opcode `0x12`."*
+
+Do not run that decompile. Two independent reasons, neither of which is the retracted msgid
+argument below:
+
+1. **The premise was already disproven locally.** Item 2 of this very section records that the
+   dispatcher at `0x07F1177E` was read: it loads the opcode, matches against `atts_handlers[]`
+   (stride 8), loads the handler into `r5` and sets `r0` from `[sp, #4]` before `blx r5`. So the
+   calling convention question that motivated the decompile has an answer already, and it says
+   `r0` is populated — which is also why the `atts_write_rsp_send` claim was retracted.
+2. **It cannot reach the fault anyway.** The crash is a bad *handler pointer* (`r5` =
+   `0x50001500`) resolved during queue dispatch — one layer above ATTS. Which ATTS helper
+   calls `ke_msg_send` says nothing about how `r5` acquired that value. (This point stands on
+   the disassembly alone; it deliberately does not rely on naming the destination task, because
+   the enum values behind `dest_id = 1` and `src_id = 0xFF` come from SDK headers that are not
+   vendored here and so cannot be re-checked offline.)
+
+Recording this so the cancellation is visible where the plan was written, not only three
+sections further down.
 
 
-### Independent check before that decompile: the msgid cannot be an ATT or LLC message
+### RETRACTED: "the msgid cannot be an ATT or LLC message" (independent check, 2nd revision)
 
-Before spending a decompile cycle on the dispatcher, the recorded fault registers were
-re-checked against the SDK's own message-id arithmetic (`ip_src/inc/ke_msg.h`):
+This section argued that the fault record was provably garbage because it violated a macro
+it attributed to `ip_src/inc/ke_msg.h`:
 
 ```c
-#define KE_MSG_ID(dest, src)  ((dest << 8) | (src & 0xFF))
+#define KE_MSG_ID(dest, src)  ((dest << 8) | (src & 0xFF))   /* does not exist */
 ```
 
-The captured header is self-inconsistent under that formula:
+**That macro is not in the SDK.** The name does not exist in any shipped header; the only
+occurrences anywhere in this repo are inside the two markdown files that quoted it. So this
+section cited a formula it had attributed to a specific file (`ip_src/inc/ke_msg.h`) without
+ever opening that file — the same failure mode as the retracted `atts_write_rsp_send` claim
+directly above, and this time the *retraction* inherited it. Worth naming the pattern
+explicitly: the correction committed as a fix for one unverified assumption was itself built
+on an unverified assumption, and both produced confident-sounding prose. The real primitives are `KE_BUILD_ID`,
+`KE_FIRST_MSG`, `MSG_T` and `MSG_I`; under them the low byte of a msgid is the *index within
+the defining module's enum*, not `src_id`, and ids carry no dest/src information at all. So
+the two rules this section claimed were SDK-enforced (`msgid & 0xFF == src & 0xFF`, and
+`MSG_T(msgid) == dest & 0xFF`) are not rules, and every conclusion drawn from them falls:
 
-| field | captured value |
-|---|---|
-| `msgid` | `0x0101` |
-| `dest_id` | `0x0001` |
-| `src_id` | `0x00FF` |
+* ~~"the captured header is self-inconsistent"~~ — there is no consistency relation to violate.
+* ~~"TASK_ID_LLC messages live in the unretained heap, so this block can't be one"~~ — rested
+  on reading `msgid >> 8` as a task id, which is exactly the misreading being withdrawn.
+* ~~"therefore the 'which of the 13 `atts_send_pdu` call sites' question is malformed"~~ — the
+  question may still be malformed, but not for this reason; it is back open.
 
-* **Low byte mismatch.** `KE_MSG_ID(0x0001, 0x00FF)` = `(0x0001 << 8) | (0x00FF & 0xFF)` =
-  **`0x01FF`**. The captured low byte is **`0x01`**, not `0xFF`. A legitimately-sent message
-  always has `msgid & 0xFF == src_id & 0xFF`; this one does not. So the header was never
-  produced by a valid `ke_msg_alloc(msgid, dest, src)` + `ke_msg_send` pair — whatever wrote
-  these 12 bytes did not use consistent arguments.
-* **High-byte range.** `msgid >> 8` must equal `dest_id`. It does here (`1 == 1`), but
-  `TASK_ID_LLC = 1` messages live in the **unretained** heap (`llc_tag` is placed there by
-  design), while the faulting block sits at `0x07FD599C` — inside `rwip_heap_msg_ret`
-  (`0x07FD5404`..`0x07FD5B80`). No legitimate LLC message should ever be allocated there.
-* Even read charitably as `0x0101 = LLC_CON_UP_IND`, that message's param is
-  `struct llc_con_up_ind` (~16 B, connection handle + role + MTI fields), not
-  `param_len = 0`. And no code path sends an LLC indication with `dest = TASK_ID_LLC`
-  itself; indications go to GAP/GATT.
+Note what did **not** change: the observation that `0x0048A55A` (free-block magic) sits
+immediately after the 12-byte header is a fact about RAM, independent of any msgid rule. It
+suggests-but-does-not-prove the allocator-overlap reading, exactly as §2 originally said.
 
-**Consequence.** The "which of the 13 `atts_send_pdu` call sites emits this message"
-question is very likely **malformed**. An ATT write response would carry an `ATTS_*` msgid
-(task type 9 → `0x09xx`) routed to `TASK_ID_GATT`, not `0x01xx` → `TASK_ID_LLC`. Following
-the `atts_handlers[]` dispatch for opcode `0x12` will almost certainly not terminate at this
-header, because this header probably is not an emitted message at all — it is garbage the
-allocator handed back (a stale/freed block's first four words happening to decode as a
-plausible-looking `mblock_used` header). That is the same class of error as retracted above:
-treating one decoded field-set as a verified fact without cross-checking the rest.
+Two further corrections to claims made in this section's own name:
 
-**What would actually settle it** (in priority order; step 1 is buildable today):
-1. Extend the existing observation log (`diag_observe()` in
-   `firmware/ble/user_eink_diag.c`, already wired under `EINK_DIAG=1`) so it also records
-   every *outgoing* message at its application-visible handler entry — i.e. capture
-   `(msgid, dest, src, param_len, param)` for each message the ATTS/GATT layers deliver,
-   not just `CUSTS1_VAL_WRITE_IND`. Then re-run the single-1-byte-write repro and diff the
-   last logged legitimate header against the crashed one. If no logged message ever has
-   `msgid == 0x0101`, that confirms the garbage-header reading above and moves the question
-   squarely back to the allocator. The crash-site record alone cannot distinguish "rogue
-   caller" from "allocator returned a free block"; a send-time log can.
-2. Dump the ROM again (`ke_rom_dump.py --rom`) and rebuild the symbol CSV from
-   `da14585_586.lib`; both artifacts are outside this repo, so the addresses cited above
-   cannot currently be re-verified offline.
-3. Only then decide whether the `atts_handlers[]` decompile is pointed at the right target.
+* *"TASK_ID_LLC messages live in the unretained heap while the faulting block sits inside
+  `rwip_heap_msg_ret`"* — the heap-bound half of that is real and re-confirmed here:
+  `ke_rom_dump.py:34` defines the msg region as `0x07FD5404..0x07FD5B80`, and the fault base
+  `0x07FD599C` is inside it (`0x07FD5404 <= 0x07FD599C < 0x07FD5B80`). The task-id half depended
+  on the withdrawn msgid reading, so the combination proves nothing.
+* *"the crash persisted after `MSG_HEAP_SZ` was raised"* — true, but weaker than it sounds.
+  `user_config.h:155` guards the define with `#if !EINK_DIAG`, so **diagnostic builds silently
+  fall back to the SDK default 1392 B pool.** Any repro run under `EINK_DIAG=1` was therefore
+  testing the *unfixed* heap size. Before repeating any "persisted after the fix" statement,
+  check which build produced it — this alone could account for the apparent persistence.
 
-**Decision: live with it; do not patch.** Recorded here because it was asked directly:
+### Build caveat that invalidates several negative results
+
+`firmware/ble/config/user_config.h:155` sets `MSG_HEAP_SZ (1904)` only under `#if !EINK_DIAG`,
+and `firmware/Makefile:40` defaults `EINK_DIAG ?= 0`. So the two configurations differ in msg-pool
+size (1904 vs 1392), in retained-RAM layout, and by the ~650-byte CRC history region. Any
+conclusion that depends on heap geometry or pool pressure must therefore name its build, or it
+means nothing.
+
+One concrete inconsistency to resolve before trusting the allocator arguments in §2: the SWD heap
+walk reports `heap[2]` at `0x07FD5404` with *"1784 B free"*, which implies a pool near 1904 B —
+i.e. it reads as a **non-diagnostic** measurement — while the diag log line quoted at the head of
+§2 (`msgid=0xFD0A ... → CMD`) can only exist in an `EINK_DIAG=1` build, where the pool is 1392 B.
+Neither measurement states its build, so they may be describing different memory maps. If so, the
+claim "the crash persisted after `MSG_HEAP_SZ` was raised" is not established at all, because the
+diagnostic build never had the larger pool.
+
+### Raw observations, and where each one actually came from
+
+Withdrawing the validators above removes the *explanations*, not the *facts*. These remain on
+the record exactly as measured — but they were captured by two different mechanisms, and
+mixing them is how both earlier readings got their false confidence:
+
+* The 12-byte fault header is immediately followed by `0x0048A55A`, the KE free-block magic.
+* `PC = 0x50001500` (`GP_ADC_CTRL_REG`) is the value the dispatcher branched to through `r5`.
+
+The first revision used observation 1 to argue "allocator overlap"; the second used a msgid
+rule to argue "freed block decoded as a header". Neither argument survives, but neither
+observation was touched by the retractions — they are raw measurements. Anyone resuming this
+should start there rather than from any interpretation of them, and should note explicitly
+that a plausible-sounding bridge between the two has never been demonstrated.
+
+Provenance, stated because it was silently blurred twice:
+
+* The `msgid` / `dest_id` / `src_id` values come from **stacked registers** `R0`–`R3` in the
+  `HardFault_HandlerC` dump at `STATUS_BASE`. That is all the register capture contains.
+* `param_len = 0`, and the following `0x0048A55A`, come from a **separate RAM read** of the block
+  at `0x07FD599C`. They are not part of the register set, and no single snapshot gives all five
+  fields side by side.
+
+Every field list in this document that reads *"msgid=0x0101, dest=0x0001, src=0x00FF,
+param_len=0"* is therefore a join across two captures taken at different times. That join is
+plausible and probably harmless, but it has never been justified in writing — and a retraction
+built on top of such a join is exactly what happened twice.
+
+### Dead ends: why no further experiment in this repo can settle it
+
+Three candidate experiments were proposed across the last three revisions. All three are dead,
+each for a concrete reason — two verified here, one taken from your hardware check. Recorded so
+the next reader does not re-derive them.
+
+1. **Instrument `ke_msg_send()` to log headers at send time.** Impossible: `ke_msg_send`
+   (`0x07F1BBE2`, address from the ROM dump, not re-verifiable offline) is mask ROM and is not
+   interposable — the symbol resolves into ROM and nothing in our link overrides it. Verified
+   here: zero `__EXCLUDE_ROM_*` defines exist anywhere under `firmware/`, so no ROM function is
+   being replaced by a RAM copy in this build.
+2. **Log from `user_catch_rest_hndl()` instead.** Structurally blind to the target: the
+   crashing message faults inside the ROM's dispatch, *before* any application handler runs
+   (your point, from the device-side evidence; consistent with the code here — `diag_observe()` is
+   called only from `user_catch_rest_hndl`'s `CUSTS1_VAL_WRITE_IND` case, `user_eink_app.c:292`,
+   so it can only ever log messages that reached an app handler).
+   `diag_observe()` therefore only ever records successfully delivered messages, by
+   construction. This is why the previously-suggested "diff the last logged header against the
+   crashed one" cannot work — the crashed one is never in the log.
+3. **Poll the free list for a corrupted block.** Same dead end as the RAM validator already
+   abandoned (§2 · Claims that do not hold): the corruption is transient and is consumed by the
+   very dispatch that faults, so a poll observes only the healthy state.
+
+Also unavailable offline: the addresses cited throughout §2 (`0x07F1BDDA`, `0x07F11956`,
+`0x07F10B54`, the heap bounds) come from `ke_rom_128k.bin` plus a symbol CSV built from
+`da14585_586.lib`. Neither artifact, nor the Ghidra project, nor an SWD target is present in
+this checkout, so none of them can be re-verified here. Re-dump with `ke_rom_dump.py --rom`
+against real hardware before building any further argument on those numbers.
+
+**Step zero, cheap and local, before anything else:** re-run the single-1-byte-write repro and
+the `ke_env` heap walk in *both* `EINK_DIAG=0` and `EINK_DIAG=1`, and label every number with its
+build. If the HardFault does not reproduce on the `EINK_DIAG=0` build, then the whole §2 question
+was an artefact of the diagnostic build's smaller pool plus retained-RAM pressure, and the search
+ends there. That test has apparently never been recorded as run, and it is the only remaining
+experiment that this repo can actually perform.
+
+**Beyond that**, moving this requires evidence this repo cannot generate: a second board
+for A/B comparison (isolate firmware-state effects from silicon errata), or a Renesas erratum
+listing for the DA14585 KE queue/allocator. Absent either, the honest status is *undetermined*.
+
+### Decision: live with it; do not patch
+
+Recorded because it was asked directly, and agreed by both sides of the exchange:
+
 1. The defect (wherever it resolves to) is in mask ROM. The only RAM-side hook is the
    `PATCH_ADDR` controller, and all 22 registers measure their reset value — zero active
    patches. Enabling one redirects a ROM *instruction fetch*, which cannot rewrite a bad
-   *message field*.
+   *message field*. That mismatch is the crux: even a working patch mechanism has no handle
+   on this class of defect.
 2. Patching would rely on undocumented silicon behaviour in a device that must survive
    field use.
 3. The Write-Without-Response pipeline plus the per-chunk receipt bitmap already gives a
    byte-exact 30,000-byte upload, verified over SWD, with the panel untouched unless
    `--refresh` is passed. The crash is avoided structurally, not worked around blindly.
 
-Root cause remains **open**, now narrowed: the search space is no longer "13 ATT call
-sites"; it is "why does the retained msg heap hand out a block whose header decodes to a
-self-inconsistent msgid" — an allocator-state question, not a dispatcher-question.
+Root cause remains **open**, and now honestly labelled: whether the fault record is an emitted
+message or a freed block decoded as a header is **undetermined**, because the fields that would
+decide it have no enforceable relationship. Two bugs in this area are fixed and hardware-
+verified (heap starvation §1, chunk loss §2b); this one is parked with its dead ends documented.
+
 
 ---
 

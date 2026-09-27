@@ -306,10 +306,14 @@ heap cannot grow further without shrinking the framebuffer.
 
 1. **OPEN — HardFault on any ATT Write Request.** Write *with* response (`response=True`)
    faults in the ROM's `ke_queue_insert` (`blx r5` @ `0x07F1BDDA`, LR `0x07F1BDDD`), which
-   dispatches a garbage handler `0x50001500` = `GP_ADC_CTRL_REG`. Note: the crash-site
-   message header (`msgid=0x0101`, `dest=1`, `src=0xFF`) is itself self-inconsistent under
-   `KE_MSG_ID` (low byte should be `0xFF`, not `0x01`), so it is probably a freed block's
-   bytes decoded as a header, not an emitted ATT message — see
+   dispatches a garbage handler `0x50001500` = `GP_ADC_CTRL_REG`. Root cause is
+   **undetermined, and parked**: whether the crash-site header (`msgid=0x0101`, `dest=1`,
+   `src=0xFF`) is an emitted message or a freed block decoded as a header cannot be decided
+   from its own fields — msgid bytes identify the defining module and enum index, not dest/src,
+   so there is no consistency relation to check. Two readings have been written and retracted
+   on exactly this mistake (the second time, the *retraction* cited a `KE_MSG_ID` macro that
+   does not exist). Do not restart the investigation from either framing, and do not propose
+   send-time logging or a free-list poll: both are recorded as dead ends in
    [`BLE_CRASH_DIAGNOSIS.md`](BLE_CRASH_DIAGNOSIS.md) §2. Write *without* response works.
    **Use Write Without Response until this is fixed; do not attempt a ROM patch** (the
    `PATCH_ADDR` controller redirects instruction fetches, not message fields, and all 22
