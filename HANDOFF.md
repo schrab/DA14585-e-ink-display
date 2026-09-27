@@ -4,8 +4,8 @@ This document is the complete guide for continuing development, compilation, fla
 
 > **Read [`BLE_CRASH_DIAGNOSIS.md`](BLE_CRASH_DIAGNOSIS.md) before changing the build, the
 > KE heap sizes, or the BLE transport.** It documents a fixed KE-message-heap starvation
-> bug, an *open* HardFault on any ATT Write Request, and the environment gotchas listed
-> in §3 below.
+> bug, an **unresolved** HardFault on any ATT Write Request (with two withdrawn analyses
+> recorded, so the dead ends are not repeated), and the environment gotchas in §3 below.
 
 ---
 
