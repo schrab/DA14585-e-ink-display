@@ -11,17 +11,26 @@ from pyocd.core.helpers import ConnectHelper
 from pyocd.core.exceptions import Error as PyOCDError
 
 SYSRAM_BASE = 0x07FC0000
-BIN_PATH = "firmware/build/eink_firmware.bin"
+DEFAULT_BIN = "firmware/build/eink_ble_firmware.bin"
+FALLBACK_BIN = "firmware/build/eink_firmware.bin"
 
 def main():
     print("=" * 65)
     print("DA14585 SysRAM Firmware Boot & Verification")
     print("=" * 65)
 
-    with open(BIN_PATH, "rb") as f:
+    import os
+    if len(sys.argv) > 1:
+        bin_path = sys.argv[1]
+    elif os.path.exists(DEFAULT_BIN):
+        bin_path = DEFAULT_BIN
+    else:
+        bin_path = FALLBACK_BIN
+
+    with open(bin_path, "rb") as f:
         bin_data = f.read()
 
-    print(f"[+] Loaded binary: {BIN_PATH} ({len(bin_data)} bytes)")
+    print(f"[+] Loaded binary: {bin_path} ({len(bin_data)} bytes)")
     sp, pc = struct.unpack("<II", bin_data[:8])
     print(f"    - Initial SP: 0x{sp:08X}")
     print(f"    - Reset PC  : 0x{pc:08X}")
