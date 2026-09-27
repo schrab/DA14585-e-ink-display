@@ -372,6 +372,48 @@ exact faulting instruction, the exact free-block layout, and that the crash is i
 *callers* of `ke_msg_send` rather than the allocator.
 
 
+### Ghidra / static call-graph of the ROM (2026-09-28)
+
+Ghidra 12.1.2 + PyGhidra + JDK 26 are installed, the 128 KB ROM imports cleanly at base
+`0x07F00000` as ARM Cortex-M0, and `rom_callers.py` resolves the call graph with capstone
+against the 794 ROM symbols.
+
+**Every caller of `ke_msg_send` (16 sites, 12 functions):**
+
+| caller | sites | role |
+|---|---|---|
+| **`atts_send_pdu`** | `0x07F1197C` | **ATT server transmit — the `ATT_WRITE_RSP` path** |
+| `l2cc_pdu_recv_ind_handler_func` | 3 (`0x07F157E0`, `0x07F15A02`, `0x07F15B0E`) | L2CAP receive |
+| `gattc_set_mtu` | `0x07F11B86` | MTU exchange response |
+| `gapc_send_error_evt` | `0x07F14D2C` (x2) | error event |
+| `gapm_send_error_evt` | `0x07F16B4A` | error event |
+| `gapc_lecnx_check_rx` | `0x07F14FCE` | connection param check |
+| `smpc_pdu_send` | `0x07F13D36` | Security Manager |
+| `smpc_generate_e1` | `0x07F13A24` | Security Manager |
+| `smpc_dhkey_calc_start` | `0x07F1B5FA` | Security Manager |
+| `smpc_check_repeated_attempts` | `0x07F137EA` | Security Manager |
+| `ke_msg_forward` | `0x07F1BC24` | forwarding |
+| `ke_msg_forward_new_id` | `0x07F1BC34` | forwarding |
+
+**`atts_send_pdu` is the only ATT-server transmit path**, and an `ATT_WRITE_RSP` must go
+through it, so that is where the rogue pointer is being sourced. Everything else in the
+list is either L2CAP/SMP plumbing or error events, none of which a 1-byte write triggers.
+
+A verified non-bug along the way: the alloc/send pair at `0x07F11956`/`0x07F11978` looks
+like a double header subtraction but is not. `ke_msg_alloc` returns `block + 12`; the helper
+adds 6 and returns `block + 18`; its caller subtracts the 6 back to `block + 12`; and
+`ke_msg_send` subtracts 12 to recover `block`. Consistent.
+
+**Next step:** decompile `atts_send_pdu` (0x07F118xx) and its predecessor to find how the
+response `param` pointer is derived, and check it against the `ke_msg_alloc` return.
+
+**Tooling note.** Ghidra's headless scripting proved awkward: Ghidra 12 no longer compiles
+Java scripts on the fly, and `pyghidra.run_script` silently produced an empty result. The
+caller analysis is therefore done with capstone (`rom_callers.py`), which is deterministic
+and fast. Ghidra remains installed and the project is at `/tmp/opencode/ghidra_proj` for
+any deeper decompilation.
+
+
 ---
 
 ## 3. Linux environment notes

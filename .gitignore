@@ -34,3 +34,4 @@ test_ph*.bin
 test_img2_*.bin
 ke_rom_128k.bin
 ke_rom_symbols.csv
+rom_decomp_out.txt
