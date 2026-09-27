@@ -35,7 +35,11 @@ def load_symbols():
         if len(p) >= 3:
             v = int(p[0], 16)
             if ROM_BASE <= v < ROM_BASE + ROM_SIZE:
-                syms.append((v, p[2]))
+                # SDK symbol addresses carry the Thumb bit. Capstone misdecodes when
+                # handed an odd start address (it produced `lsrs r5, r6, #0x12` for the
+                # real `push {r0,r1,...}`), so always mask to the even instruction
+                # address and keep the bit separately.
+                syms.append((v & ~1, p[2], bool(v & 1)))
     syms.sort()
     return syms
 
@@ -46,7 +50,7 @@ def containing(addr, syms):
     i = bisect.bisect_right(addrs, addr) - 1
     if i < 0:
         return None
-    base, name = syms[i]
+    base, name = syms[i][0], syms[i][1]
     return (name, addr - base)
 
 
@@ -55,7 +59,7 @@ def disassemble(rom, syms):
     md = Cs(CS_ARCH_ARM, CS_MODE_THUMB | CS_MODE_MCLASS)
     md.detail = False
     insns = []
-    starts = [s[0] for s in syms]
+    starts = [s[0] for s in syms]   # already masked even
     seen = set()
     for start in starts:
         if start in seen:
@@ -66,6 +70,51 @@ def disassemble(rom, syms):
             if i.mnemonic in ("bx", "pop") and "pc" in i.op_str:
                 break
     return insns
+
+
+def follow(rom, entry, depth=0, seen=None, calls=None, max_bytes=0x2000):
+    """Recursive-descent disassembly from `entry`, following every branch.
+
+    Linear sweep is unsafe here: compiler output interleaves literal pools with code, so
+    a straight decode desynchronises and emits nonsense (we saw `mcr2` and a branch to
+    0x8458509 inside atts_l2cc_pdu_recv_handler_func). Following control flow only ever
+    decodes real instructions.
+    """
+    if seen is None:
+        seen = set()
+    if calls is None:
+        calls = []
+    if entry in seen or len(seen) * 4 > max_bytes:
+        return calls
+    seen.add(entry)
+
+    md = Cs(CS_ARCH_ARM, CS_MODE_THUMB | CS_MODE_MCLASS)
+    off = entry - ROM_BASE
+    if not (0 <= off < len(rom)):
+        return calls
+    chunk = rom[off:off + 0x300]   # long enough for real functions; returns stop the walk
+    for i in md.disasm(chunk, entry):
+        mn, ops = i.mnemonic, i.op_str
+        if mn.startswith("bl") and not mn.startswith("blx"):
+            try:
+                tgt = int(ops.strip().lstrip("#"), 0)
+            except ValueError:
+                continue
+            calls.append((tgt, entry, i.address))
+            follow(rom, tgt, depth + 1, seen, calls, max_bytes)
+        elif mn in ("b", "bne", "beq", "bgt", "blt", "bge", "ble", "bcs", "bcc",
+                    "bhi", "bls", "bpl", "bmi", "bvc", "bvs") and depth < 40:
+            try:
+                tgt = int(ops.strip().lstrip("#"), 0)
+            except ValueError:
+                continue
+            if ROM_BASE <= tgt < ROM_BASE + ROM_SIZE:
+                follow(rom, tgt, depth + 1, seen, calls, max_bytes)
+        elif mn == "bx" and "lr" in ops:
+            return calls                      # function return: stop this path
+        elif mn == "pop" and "pc" in ops:
+            return calls
+    return calls
 
 
 def main():
@@ -94,7 +143,7 @@ def main():
 
     if a.all:
         rows = []
-        for base, name in syms:
+        for base, name, _tb in syms:
             rows.append((len(callers.get(base, [])), name, base))
         rows.sort(reverse=True)
         for n, name, base in rows[:40]:

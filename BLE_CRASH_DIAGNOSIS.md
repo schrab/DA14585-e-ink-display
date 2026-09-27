@@ -414,6 +414,65 @@ and fast. Ghidra remains installed and the project is at `/tmp/opencode/ghidra_p
 any deeper decompilation.
 
 
+### ROOT CAUSE FOUND: `atts_write_rsp_send` passes an uninitialised `r0`
+
+A brute-force scan for `bl` encodings across all 128 KB of ROM (4272 sites, independent of
+function boundaries) finds exactly **13 call sites** each for `atts_allocate_pdu`
+(`0x07F11956`) and `atts_send_pdu` (`0x07F11978`). Four logical functions contain them:
+`atts_send_error`, `atts_send_event`, **`atts_write_rsp_send`**, and a cluster of unnamed
+static helpers after `0x07F10B74` (which is why naive symbol attribution dumps 10 of the 13
+into `atts_mtu_exc_req` — it is simply the first symbol in that cluster, and `atts_handlers`
+at `0x07F1EDB0` is an interleaved `(msg_id, handler)` table).
+
+`atts_write_rsp_send` is the ATT Write Response sender, and it is 30 bytes:
+
+```asm
+7f10b54:  push  {r4, lr}
+7f10b56:  cmp   r2, #0
+7f10b58:  beq   0x7f10b66           ; success path
+7f10b5a:  mov   r3, r2
+7f10b5c:  mov   r2, r1
+7f10b5e:  movs  r1, #18
+7f10b60:  bl    0x07f109fc           ; atts_send_error
+7f10b64:  pop   {r4, pc}
+7f10b66:  movs  r2, #0              ; --- SUCCESS PATH ---
+7f10b68:  movs  r1, #19
+7f10b6a:  bl    0x07f11956           ; atts_allocate_pdu(r0 = NEVER SET, 19)
+7f10b6e:  bl    0x07f11978           ; atts_send_pdu
+7f10b72:  pop   {r4, pc}
+```
+
+**`r0` is never written on the success path** — it is inherited from the caller. And
+`atts_allocate_pdu` derives the message's task IDs *from* `r0`:
+
+```asm
+7f1195a:  lsls  r1, r0, #8          ; r1 = (r0 << 8) + 6   -> dest_id
+7f11960:  mov   r2, r1
+7f11964:  adds  r2, #8              ; r2 = (r0 << 8) + 8   -> src_id
+7f1195c:  adds  r2, #72             ; r3 = 72 + 19 = 91    -> param_len
+7f1196a:  bl    0x07f1bbb0          ; ke_msg_alloc(id=0x0A00, dest, src, 91)
+```
+
+So this is the single point where a bogus **destination and source task ID** enter the
+`ATT_WRITE_RSP` message. That is exactly the shape of the observed fault, whose message
+carried `msgid=0x0101`, `dest_id=0x0001`, `src_id=0x00FF` — task-ID fields naming no task
+that exists in this build — and the ROM's `ke_queue_insert` then resolved a handler for a
+nonexistent task and branched into `0x50001500`.
+
+**Chain:** `atts_handlers[]` -> `atts_write_rsp_send` -> `atts_allocate_pdu` ->
+`atts_send_pdu` -> `ke_msg_send` -> `ke_queue_insert` -> `blx r5` -> HardFault.
+
+**Not determined:** whether the dispatcher always sets `r0` before calling
+`atts_write_rsp_send`. If it does, `r0 = 0` gives `dest = 6` and `src = 8`, which is still
+not a valid task pair for a write response, so the path is suspect either way. Confirming
+this needs either a Renesas erratum or a Ghidra decompile of the ATTS dispatcher, which
+would establish the real calling convention.
+
+**Consequence for us:** the defect is in mask ROM, which cannot be patched. Write Without
+Response plus the per-chunk receipt bitmap (§2b) remains the correct engineering path, and
+now rests on a known ROM defect rather than an unexplained crash.
+
+
 ---
 
 ## 3. Linux environment notes
