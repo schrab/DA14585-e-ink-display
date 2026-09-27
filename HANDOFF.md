@@ -294,6 +294,7 @@ sudo rfkill unblock bluetooth
 ├── check_target_now.py            # SWD core status, register, and GPIO inspector
 ├── reboot_target.py               # Software reset (recovers from HardFault / NMI halt)
 ├── display_image.py               # Universal image processing pipeline
+├── dither_convert.py              # Halftone / error-diffusion converter (3-colour)
 ├── test_pattern_red_400x300.png   # 400x300 tri-color test graphic
 ├── gfx/progromirovay.png          # Default test image (--image in all three clients)
 ├── gfx/progromirovay_preview.png  # 400x300 reconstruction from the wire planes

@@ -21,6 +21,8 @@ import time
 from bleak import BleakClient, BleakScanner
 
 sys.path.insert(0, ".")
+
+from dither_convert import convert as dither_convert  # noqa: E402
 from ble_eink_client import (  # noqa: E402
     CHAR_CMD_UUID,
     CHAR_IMAGE_UUID,
@@ -55,9 +57,15 @@ async def main():
                     help="max verify-and-resend passes")
     ap.add_argument("--refresh", action="store_true",
                     help="send command 0x06 to redraw the panel (slow: ~17 s)")
+    ap.add_argument("--dither", default="bayer", choices=["bayer", "fs", "none", "threshold"],
+                    help="halftone method: bayer (default), fs (error diffusion), "
+                         "none (nearest palette colour) or threshold (legacy hard cut)")
     args = ap.parse_args()
 
-    data = convert_image_to_tricolor_buffer(args.image)
+    if args.dither == "threshold":
+        data = convert_image_to_tricolor_buffer(args.image)
+    else:
+        data, _ = dither_convert(args.image, method=args.dither)
     addr = args.device or await find_device()
     if not addr:
         print("[-] E-Ink display not found")
