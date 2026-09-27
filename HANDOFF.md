@@ -4,8 +4,9 @@ This document is the complete guide for continuing development, compilation, fla
 
 > **Read [`BLE_CRASH_DIAGNOSIS.md`](BLE_CRASH_DIAGNOSIS.md) before changing the build, the
 > KE heap sizes, or the BLE transport.** It documents a fixed KE-message-heap starvation
-> bug, an *open* HardFault on any ATT Write Request, and the environment gotchas listed
-> in §3 below.
+> bug, an *open* HardFault on any ATT Write Request (root cause narrowed to allocator
+> state, not an ATT call site — see §2's second-revision note before investigating), and
+> the environment gotchas listed in §3 below.
 
 ---
 
@@ -178,6 +179,15 @@ ROM's `ke_queue_insert`. A **Write Command** (`response=False`) works. Use
 ```bash
 ./venv/bin/python upload_noresp.py --image test_pattern_red_400x300.png
 ```
+
+The crash is **not patched and will not be patchable**: it lives in mask ROM, the hardware
+`PATCH_ADDR` controller redirects instruction fetches (not message fields) and reads all-
+reset values, and the Write-Without-Response path avoids the fault structurally rather
+than working around it. Root cause is still open but re-narrowed — the crash-site message
+header fails the SDK's own `KE_MSG_ID` consistency check, so it is probably a freed block
+decoded as a header, i.e. an allocator-state question, not an ATT dispatcher question. See
+[`BLE_CRASH_DIAGNOSIS.md`](BLE_CRASH_DIAGNOSIS.md) §2 before starting new investigation
+(the "find the rogue `atts_send_pdu` call site" framing is likely malformed).
 
 The client is self-verifying: the firmware keeps a per-chunk receipt bitmap
 (`eink_chunk_map[16]`, one bit per 240-byte chunk) and command `0x08` notifies it, so

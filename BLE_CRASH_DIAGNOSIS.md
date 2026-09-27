@@ -82,6 +82,15 @@ comparing against the host-side conversion — **no display refresh involved**.
 
 ## 2. Open: HardFault on any ATT Write Request (with response)
 
+> **Status update (2026-09-28, second revision).** The §2 "Fault record" header below was
+> long read as a genuine LLC message; the low-byte check in
+> [§2 · Independent check](#independent-check-before-that-decompile-the-msgid-cannot-be-an-att-or-llc-message)
+> shows it is self-inconsistent (`KE_MSG_ID(0x0001, 0x00FF)` = `0x01FF`, not `0x0101`), so
+> the crash-site header is most likely garbage from a freed block rather than an emitted
+> message. That reframes the open question from "which ATT call site sent this" to "why did
+> the retained msg heap hand out that block". Root cause still open; decision recorded
+> there: live with it, do not patch the ROM.
+
 ### Symptom
 
 Any ATT **Write Request** (`response=True`) crashes the board. A **Write Command**
@@ -451,6 +460,76 @@ considers free. The next step is to determine the ATTS calling convention proper
 decompile the `atts_handlers[]` dispatch loop and the handler it selects for an
 `ATT_WRITE_REQ` (opcode `0x12`) - rather than reasoning from one call site in isolation.
 
+
+### Independent check before that decompile: the msgid cannot be an ATT or LLC message
+
+Before spending a decompile cycle on the dispatcher, the recorded fault registers were
+re-checked against the SDK's own message-id arithmetic (`ip_src/inc/ke_msg.h`):
+
+```c
+#define KE_MSG_ID(dest, src)  ((dest << 8) | (src & 0xFF))
+```
+
+The captured header is self-inconsistent under that formula:
+
+| field | captured value |
+|---|---|
+| `msgid` | `0x0101` |
+| `dest_id` | `0x0001` |
+| `src_id` | `0x00FF` |
+
+* **Low byte mismatch.** `KE_MSG_ID(0x0001, 0x00FF)` = `(0x0001 << 8) | (0x00FF & 0xFF)` =
+  **`0x01FF`**. The captured low byte is **`0x01`**, not `0xFF`. A legitimately-sent message
+  always has `msgid & 0xFF == src_id & 0xFF`; this one does not. So the header was never
+  produced by a valid `ke_msg_alloc(msgid, dest, src)` + `ke_msg_send` pair — whatever wrote
+  these 12 bytes did not use consistent arguments.
+* **High-byte range.** `msgid >> 8` must equal `dest_id`. It does here (`1 == 1`), but
+  `TASK_ID_LLC = 1` messages live in the **unretained** heap (`llc_tag` is placed there by
+  design), while the faulting block sits at `0x07FD599C` — inside `rwip_heap_msg_ret`
+  (`0x07FD5404`..`0x07FD5B80`). No legitimate LLC message should ever be allocated there.
+* Even read charitably as `0x0101 = LLC_CON_UP_IND`, that message's param is
+  `struct llc_con_up_ind` (~16 B, connection handle + role + MTI fields), not
+  `param_len = 0`. And no code path sends an LLC indication with `dest = TASK_ID_LLC`
+  itself; indications go to GAP/GATT.
+
+**Consequence.** The "which of the 13 `atts_send_pdu` call sites emits this message"
+question is very likely **malformed**. An ATT write response would carry an `ATTS_*` msgid
+(task type 9 → `0x09xx`) routed to `TASK_ID_GATT`, not `0x01xx` → `TASK_ID_LLC`. Following
+the `atts_handlers[]` dispatch for opcode `0x12` will almost certainly not terminate at this
+header, because this header probably is not an emitted message at all — it is garbage the
+allocator handed back (a stale/freed block's first four words happening to decode as a
+plausible-looking `mblock_used` header). That is the same class of error as retracted above:
+treating one decoded field-set as a verified fact without cross-checking the rest.
+
+**What would actually settle it** (in priority order; step 1 is buildable today):
+1. Extend the existing observation log (`diag_observe()` in
+   `firmware/ble/user_eink_diag.c`, already wired under `EINK_DIAG=1`) so it also records
+   every *outgoing* message at its application-visible handler entry — i.e. capture
+   `(msgid, dest, src, param_len, param)` for each message the ATTS/GATT layers deliver,
+   not just `CUSTS1_VAL_WRITE_IND`. Then re-run the single-1-byte-write repro and diff the
+   last logged legitimate header against the crashed one. If no logged message ever has
+   `msgid == 0x0101`, that confirms the garbage-header reading above and moves the question
+   squarely back to the allocator. The crash-site record alone cannot distinguish "rogue
+   caller" from "allocator returned a free block"; a send-time log can.
+2. Dump the ROM again (`ke_rom_dump.py --rom`) and rebuild the symbol CSV from
+   `da14585_586.lib`; both artifacts are outside this repo, so the addresses cited above
+   cannot currently be re-verified offline.
+3. Only then decide whether the `atts_handlers[]` decompile is pointed at the right target.
+
+**Decision: live with it; do not patch.** Recorded here because it was asked directly:
+1. The defect (wherever it resolves to) is in mask ROM. The only RAM-side hook is the
+   `PATCH_ADDR` controller, and all 22 registers measure their reset value — zero active
+   patches. Enabling one redirects a ROM *instruction fetch*, which cannot rewrite a bad
+   *message field*.
+2. Patching would rely on undocumented silicon behaviour in a device that must survive
+   field use.
+3. The Write-Without-Response pipeline plus the per-chunk receipt bitmap already gives a
+   byte-exact 30,000-byte upload, verified over SWD, with the panel untouched unless
+   `--refresh` is passed. The crash is avoided structurally, not worked around blindly.
+
+Root cause remains **open**, now narrowed: the search space is no longer "13 ATT call
+sites"; it is "why does the retained msg heap hand out a block whose header decodes to a
+self-inconsistent msgid" — an allocator-state question, not a dispatcher-question.
 
 ---
 

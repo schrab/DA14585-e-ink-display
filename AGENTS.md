@@ -306,8 +306,14 @@ heap cannot grow further without shrinking the framebuffer.
 
 1. **OPEN — HardFault on any ATT Write Request.** Write *with* response (`response=True`)
    faults in the ROM's `ke_queue_insert` (`blx r5` @ `0x07F1BDDA`, LR `0x07F1BDDD`), which
-   dispatches a garbage handler `0x50001500` = `GP_ADC_CTRL_REG`. Write *without* response
-   works. **Use Write Without Response until this is fixed.**
+   dispatches a garbage handler `0x50001500` = `GP_ADC_CTRL_REG`. Note: the crash-site
+   message header (`msgid=0x0101`, `dest=1`, `src=0xFF`) is itself self-inconsistent under
+   `KE_MSG_ID` (low byte should be `0xFF`, not `0x01`), so it is probably a freed block's
+   bytes decoded as a header, not an emitted ATT message — see
+   [`BLE_CRASH_DIAGNOSIS.md`](BLE_CRASH_DIAGNOSIS.md) §2. Write *without* response works.
+   **Use Write Without Response until this is fixed; do not attempt a ROM patch** (the
+   `PATCH_ADDR` controller redirects instruction fetches, not message fields, and all 22
+   registers measure their reset value).
 
 2. **FIXED — silent chunk loss.** Write Commands have no link-layer retransmission, so the
    host outruns the peripheral and chunks are dropped. This is a **contiguous band, not
