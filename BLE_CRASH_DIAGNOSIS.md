@@ -94,6 +94,17 @@ comparing against the host-side conversion — **no display refresh involved**.
 
 ## 2. Open: HardFault on any ATT Write Request (with response)
 
+> **Status update (2026-09-28, fifth revision — supersedes all previous). ROOT CAUSED.**
+> The `EINK_DIAG=1` write-with-response failure was **self-inflicted**: `diag_snapshot()`
+> runs a blocking CRC32 pass over ~60 KB of RAM *synchronously inside the KE write
+> handler* (`user_catch_rest_hndl`'s `CUSTS1_VAL_WRITE_IND` case). At the 16 MHz system
+> clock that blocks for tens of milliseconds, so the ATT response never completes: the
+> host gets `0x0E` (*Unlikely Error*), the board stops advertising, and there is no fault
+> (`IPSR=0`, `CFSR=0`). It is **not** a ROM bug, **not** a heap bug, and **not** a GATT
+> bug. Env-heap exhaustion was investigated and refuted. See *Step zero — root caused*
+> below. The shipping build never had it because `user_eink_diag.c` is not compiled into
+> `EINK_DIAG=0` at all.
+>
 > **Status update (2026-09-28, fourth revision — supersedes the third).** The step-zero
 > experiment has now been run (see *Step zero* below). The write-with-response failure
 > **does not reproduce on the production build** (`EINK_DIAG=0`, `MSG_HEAP_SZ=1904`): 3/3
@@ -708,18 +719,65 @@ Two corrections to the record that this test forced:
 
 ### What this does and does not establish
 
-* **Established:** the write-with-response failure is *build-configuration dependent* and
-  does not occur on the shipping configuration. Continue to use Write Without Response;
-  nothing about the production path needs to change.
-* **Not established:** that the message heap *size* is the cause. `EINK_DIAG=0` and
-  `EINK_DIAG=1` differ in more than pool size — the `user_eink_diag.c` code is compiled in
-  and the whole retained-region layout shifts (e.g. msg heap moves
-  `0x07FD5404` → `0x07FD564C`) — so this is a 1-bit comparison, n=2 vs n=3, not a
-  controlled one. The `env` heap is also nearly exhausted on `EINK_DIAG=1` (32 B free of
-  616), which is a plausible alternative contributor and was not separated out.
-* **Decisive follow-up if anyone resumes:** build a third configuration that keeps
-  `EINK_DIAG=1` but forces `MSG_HEAP_SZ (1904)` unconditionally. That isolates pool size
-  from the rest of the diagnostic build in one flash.
+### Step zero — root caused (2026-09-28, after the above)
+
+The remaining hypothesis space was narrowed by a follow-up experiment, and the cause is
+now identified. Three sub-experiments, all on `EINK_DIAG=1`, all with the same one-byte
+write-with-response of command `0x08` and no panel side effect:
+
+| env payload | msg payload | CRC pass | Result |
+|---|---|---|---|
+| 616 | 1392 | **on** | **fails**, `0x0E`, n=2 |
+| 1024 | 984 | **on** | **fails**, `0x0E`, n=1 |
+| 616 | 1392 | **off** | **OK**, n=3 |
+| 1024 | 984 | **off** | **OK**, n=3 |
+
+**The CRC flag is the only variable that matters. The heap sizes are irrelevant.**
+
+**Mechanism.** `diag_snapshot()` (`firmware/ble/user_eink_diag.c`) is called from the
+`CUSTS1_VAL_WRITE_IND` branch of `user_catch_rest_hndl`, i.e. *inside* the KE message
+dispatch for the GATT write. It CRC32s `DIAG_REGION_COUNT` regions totalling ~60 KB with
+a byte-at-a-time loop. At 16 MHz on a Cortex-M0 that is tens of milliseconds of
+uninterruptible work in the middle of the ATT write handling. The write *Command* path
+tolerates it, which is why `response=False` always worked; the write *Request* path has
+to complete a response inside the peripheral's timing budget and does not, so the host
+sees `0x0E` and the stack never returns to advertising. `IPSR=0`/`CFSR=0` throughout,
+because nothing faulted — it just never finished.
+
+**Env-heap exhaustion was proposed and is refuted.** The theory was that the write-response
+path needs an env-heap allocation the write-command path does not, and that with only
+32 B free of 616 it failed. Tested by growing env to 1024 and shrinking msg to 984
+(net-zero retained RAM, so it links): env headroom went from 32 B to **192 B free** — 3×
+or more than the estimated allocation — and the failure was **byte-identical**, same
+`PC=0x07FC1E5C`, same `LR=0xFFFFFFF9`. Refuted.
+
+Note for anyone repeating this: `#define ENV_HEAP_SZ (1024)` on its own **does not link**.
+It overflows `LR_RETAINED_RAM0` by 280 B on `EINK_DIAG=0` and 352 B on `EINK_DIAG=1`,
+because the diagnostic build already spends ~650 B of retained RAM on the CRC history.
+The net-zero trade above is what made the test possible.
+
+**Fix.** `EINK_DIAG_CRC_OFF` (Makefile). `=1` keeps the retained snapshot layout and the
+phase/count bookkeeping but skips the CRC loop, leaving the CRCs zero. `make EINK_DIAG=1`
+now defaults it to `1`, so a diagnostic build no longer wedges; pass
+`EINK_DIAG_CRC_OFF=0` to re-enable real CRCs and accept the consequence. The real fix, if
+the CRCs are ever needed again, is to move the pass out of the write handler (defer to
+`app_easy_timer`) rather than to shrink the region list.
+
+**Verified after the fix:** `EINK_DIAG=0` builds byte-for-byte unchanged
+(text 29140 / data 1164 / bss 36240) and still completes a full 30,000-byte
+125-chunk upload in one pass with the panel untouched.
+
+### Scope of this result — read before closing the bug
+
+* This explains the **`EINK_DIAG=1` hang**, fully and with a single-variable experiment.
+* It does **not** explain the older `ke_queue_insert` HardFault at `0x07F1BDDA`. That was
+  also observed on a diagnostic build, so the two may share a precondition, but a
+  multi-millisecond stall does not obviously produce a corrupted handler pointer, and
+  nothing here proves it. That fault remains **unexplained**.
+* It also does not implicate the ROM. Every mask-ROM theory in this section was written
+  while the real cause was sitting in our own `user_eink_diag.c`.
+
+
 
 **The recommendation to park this stands**, and is now better founded: the failure does
 not reproduce in the build we actually ship.

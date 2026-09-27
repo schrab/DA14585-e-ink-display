@@ -92,9 +92,20 @@ void diag_snapshot(uint8_t phase)
 
     slot = &diag_history[diag_next];
 
+    /* EINK_DIAG_CRC_OFF isolates the cost of the CRC pass itself. The retained
+     * snapshot slots are still filled field-for-field so the retained-region layout is
+     * byte-identical to a normal diagnostic build; only the ~37 ms of CRC32 over the
+     * monitored regions is skipped. If the ATT Write-Request hang disappears with this
+     * set, the blocking CRC inside the KE write handler is the cause, not RAM budget. */
+#if EINK_DIAG_CRC_OFF
+    for (i = 0; i < DIAG_REGION_COUNT; i++) {
+        slot->crc[i] = 0;
+    }
+#else
     for (i = 0; i < DIAG_REGION_COUNT; i++) {
         slot->crc[i] = diag_crc32((const uint8_t *)diag_regions[i].addr, diag_regions[i].size);
     }
+#endif
 
     slot->phase = phase;
     slot->valid = 1;

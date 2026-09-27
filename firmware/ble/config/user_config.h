@@ -152,7 +152,19 @@ static const struct security_configuration user_security_conf = {
  * Diagnostic builds therefore fall back to the SDK default so they always link;
  * EINK_DIAG is a debugging build, so it does not need the bigger pool.
  */
-#if !EINK_DIAG
+#if EINK_DIAG
+/* Step-zero follow-up (2026-09-28). The ATT Write-Request failure on EINK_DIAG=1 was
+ * initially blamed on heap budget. It is not: the binding constraint is the ~37 ms
+ * blocking CRC32 pass that diag_snapshot() runs inside the KE write handler. With
+ * EINK_DIAG_CRC_OFF=1 and these original SDK pool sizes the failure disappears, so the
+ * pools are left at the SDK defaults here.
+ *
+ * (An intermediate experiment traded 408 B out of MSG_HEAP_SZ into ENV_HEAP_SZ --
+ * msg 1392->984, env 616->1024, net zero -- to test env exhaustion. It did not help;
+ * see BLE_CRASH_DIAGNOSIS.md. ENV_HEAP_SZ also cannot simply be raised: it overflows
+ * LR_RETAINED_RAM0 by 280 B on EINK_DIAG=0 and 352 B on EINK_DIAG=1, because the
+ * diagnostic build already spends ~650 B of retained RAM on the CRC history.) */
+#else
 #define MSG_HEAP_SZ  (1904)
 #endif
 

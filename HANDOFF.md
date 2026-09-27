@@ -240,13 +240,20 @@ sudo rfkill unblock bluetooth
 > throughput and "acknowledged" messages from `ble_eink_client.py` as unreliable until
 > it is fixed — prefer `upload_noresp.py`.
 >
-> **Update 2026-09-28 (step zero):** the Write-With-Response failure is
-> build-configuration dependent and **does not reproduce on the shipping build**
-> (`EINK_DIAG=0`, 3/3 clean); it fails 2/2 on `EINK_DIAG=1`. `ble_eink_client.py` is
-> still not recommended — the bitmap-verified `upload_noresp.py` path remains the correct
-> one — but the reason is now "unverified/unreliable ACK semantics", not "known crash on
-> the shipped firmware". Use `stepzero_write_req.py` to re-test; it refuses command `0x06`
-> so it cannot refresh the panel.
+> **Update 2026-09-28 (root cause found):** the Write-With-Request failure was
+> **self-inflicted** and only ever affected `EINK_DIAG=1` builds. `diag_snapshot()` in
+> `user_eink_diag.c` ran a blocking CRC32 over ~60 KB *inside* the KE write handler,
+> which at 16 MHz exceeds the ATT response budget — the host got `0x0E`, the board
+> stopped advertising, no fault was recorded. It is not a ROM, heap, or GATT bug, and
+> env-heap exhaustion was tested and refuted. `make EINK_DIAG=1` now defaults to
+> `EINK_DIAG_CRC_OFF=1`. `EINK_DIAG=0` never had the problem because the diagnostics
+> are not compiled into it at all.
+>
+> `upload_noresp.py` is still the recommended transport (it is byte-exact and
+> self-verifying), and `ble_eink_client.py` is still not recommended — but the reason is
+> now "unverified ACK semantics", not "known crash on shipped firmware". Use
+> `stepzero_write_req.py` to re-test; it refuses command `0x06` so it cannot refresh the
+> panel.
 
 ---
 

@@ -38,11 +38,26 @@ CPU_FLAGS    := -mcpu=cortex-m0 -mthumb
 # EINK_DIAG=1 builds the RAM-CRC diagnostics into user_eink_diag.c; the default 0
 # leaves them out so they do not consume retained RAM that the KE message heap needs.
 EINK_DIAG   ?= 0
+# EINK_DIAG_CRC_OFF=1 keeps the retained CRC snapshot layout but skips the CRC32 pass
+# itself. Root-caused 2026-09-28: that pass runs synchronously inside the KE write
+# handler and, at the 16 MHz system clock, blocks for tens of milliseconds -- long
+# enough that the ATT Write-Request response never completes. The host sees ATT 0x0E and
+# the board stops advertising, with no fault (IPSR=0, CFSR=0). It is NOT a ROM, heap, or
+# GATT bug, and the heap budget is irrelevant to it. A diagnostic build therefore
+# defaults to CRC-off, which keeps the retained layout and the snapshot bookkeeping but
+# leaves the CRCs zero. Pass EINK_DIAG_CRC_OFF=0 to re-enable them and accept that
+# write-with-response will wedge the board.
+ifeq ($(EINK_DIAG),1)
+EINK_DIAG_CRC_OFF ?= 1
+else
+EINK_DIAG_CRC_OFF ?= 0
+endif
 
 DEFINES      := \
     -D__DA14585__ \
     -D__ARM_FEATURE_DSP=0 \
-    -DEINK_DIAG=$(EINK_DIAG)
+    -DEINK_DIAG=$(EINK_DIAG) \
+    -DEINK_DIAG_CRC_OFF=$(EINK_DIAG_CRC_OFF)
 
 # ─── Pre-Included Headers (Dialog SDK architecture) ──────────────────────────
 PREINCLUDES  := \

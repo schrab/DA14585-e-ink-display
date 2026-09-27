@@ -304,26 +304,23 @@ heap cannot grow further without shrinking the framebuffer.
    then reset the board. Fixed by `#define MSG_HEAP_SZ (1904)` in `user_config.h`.
    **Do not reduce this value.**
 
-1. **OPEN, but does not reproduce in production — HardFault/hang on ATT Write Request.**
-   Write *with* response (`response=True`) was believed to fault in the ROM's
-   `ke_queue_insert` (`blx r5` @ `0x07F1BDDA`, LR `0x07F1BDDD`), which
-   dispatches a garbage handler `0x50001500` = `GP_ADC_CTRL_REG`.
-   **Step zero (2026-09-28) narrows this sharply:** the failure is build-configuration
-   dependent. On `EINK_DIAG=0` (the shipping build, `MSG_HEAP_SZ=1904`) a 1-byte
-   write-with-response succeeds **3/3**; on `EINK_DIAG=1` (1392 B pool) it fails **2/2**,
-   and there it presents as a *hang* (`IPSR=0`, `CFSR=0`, advertising stops) rather than
-   the HardFault above. Root cause remains undetermined; the two builds differ in more than
-   pool size, so size is **not** established as the cause. Write *without* response works in
-   both. **Use Write Without Response; do not attempt a ROM patch** (the `PATCH_ADDR`
-   controller redirects instruction fetches, not message fields, and all 22 registers
-   measure their reset value). Do not restart the investigation from either retired
-   framing — whether the crash-site header is an emitted message or a freed block decoded
-   as a header cannot be decided from its own fields, since msgid bytes identify the
-   defining module and enum index, not dest/src. Two readings have been written and
-   retracted on exactly this mistake (the second time, the *retraction* cited a `KE_MSG_ID`
-   macro that does not exist in the SDK). Do not propose send-time logging or a free-list
-   poll: both are recorded as dead ends in
-   [`BLE_CRASH_DIAGNOSIS.md`](BLE_CRASH_DIAGNOSIS.md) §2.
+1. **ROOT-CAUSED (2026-09-28) — ATT Write Request failure was self-inflicted.**
+   Write *with* response (`response=True`) failed on `EINK_DIAG=1` only: host saw ATT
+   `0x0E` (*Unlikely Error*), the board stopped advertising, and there was **no fault**
+   (`IPSR=0`, `CFSR=0`, `PC=0x07FC1E5C`, `LR=0xFFFFFFF9`). Cause: `diag_snapshot()` in
+   `user_eink_diag.c` runs a blocking CRC32 over ~60 KB *synchronously inside the KE write
+   handler* (`user_catch_rest_hndl`'s `CUSTS1_VAL_WRITE_IND` branch), which at 16 MHz
+   blocks for tens of ms and blows the ATT response budget. Not a ROM, heap, or GATT bug.
+   **Env-heap exhaustion was proposed and is refuted** (grew env 616→1024, failure
+   byte-identical). Heap sizes are irrelevant; the CRC pass is the only variable.
+   Fix: `EINK_DIAG_CRC_OFF` (Makefile), which `make EINK_DIAG=1` now defaults to `1`.
+   **Never add blocking work to the GATT write handler** — defer to `app_easy_timer`.
+   The older `ke_queue_insert` HardFault (`blx r5` @ `0x07F1BDDA` dispatching through
+   `0x50001500` = `GP_ADC_CTRL_REG`) is **still unexplained**: it was also seen on a
+   diagnostic build, but a stall does not obviously corrupt a handler pointer.
+   For the record, the withdrawn analyses and dead ends are in
+   [`BLE_CRASH_DIAGNOSIS.md`](BLE_CRASH_DIAGNOSIS.md) §2 — do not restart from them.
+   Write *without* response remains the transport we ship.
 
 2. **FIXED — silent chunk loss.** Write Commands have no link-layer retransmission, so the
    host outruns the peripheral and chunks are dropped. This is a **contiguous band, not
@@ -334,6 +331,9 @@ heap cannot grow further without shrinking the framebuffer.
 
 ### Operational notes
 * `make flash` needs `PYTHON=../venv/bin/python` (bare `python3` has no `pyocd`).
+* `make EINK_DIAG=1` **defaults to `EINK_DIAG_CRC_OFF=1`**. That is deliberate: with the
+  CRC pass enabled the build wedges on any write-with-response. Use
+  `EINK_DIAG_CRC_OFF=0` only when you actually need CRCs, and expect the board to hang.
 * The Makefile has **no header dependency tracking** — `make clean` after editing any
   `-include`d config header.
 * A faulted or wedged board stops advertising. Recover with
