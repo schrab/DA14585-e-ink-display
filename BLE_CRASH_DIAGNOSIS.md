@@ -82,6 +82,11 @@ comparing against the host-side conversion — **no display refresh involved**.
 
 ## 2. Open: HardFault on any ATT Write Request (with response)
 
+> **Status:** not root-caused. The crash-site header is self-validating against nothing -
+> see "Independent check of the crash-site header" below, which refutes the obvious
+> invariant and retracts the earlier "self-consistent LLC message" reading. Decision is to
+> live with it: use Write Without Response.
+
 ### Symptom
 
 Any ATT **Write Request** (`response=True`) crashes the board. A **Write Command**
@@ -450,6 +455,77 @@ overclaimed, and three checks refute it:
 considers free. The next step is to determine the ATTS calling convention properly - i.e.
 decompile the `atts_handlers[]` dispatch loop and the handler it selects for an
 `ATT_WRITE_REQ` (opcode `0x12`) - rather than reasoning from one call site in isolation.
+
+
+### Independent check of the crash-site header: inconclusive, and the obvious invariant is false
+
+Before decompiling the ATTS dispatcher, the crash record was re-examined arithmetically
+against the SDK. The proposed test was that a legitimately sent message must satisfy
+`KE_MSG_ID(dest, src) == (dest << 8) | (src & 0xFF)`, so that
+`msgid & 0xFF == src_id & 0xFF`; the captured header (`msgid=0x0101`, `dest=0x0001`,
+`src=0x00FF`) would then be self-inconsistent and merely a freed block decoded as a header.
+
+**That invariant does not exist and does not hold.** There is no `KE_MSG_ID` macro in the
+SDK. The actual definitions are:
+
+```c
+#define KE_BUILD_ID(type, index)  (ke_task_id_t)(((index) << 8) | (type))   // task ids
+#define KE_FIRST_MSG(task)        (ke_msg_id_t)((task) << 8)               // task byte
+#define MSG_T(msg)                (ke_task_id_t)((msg) >> 8)
+#define MSG_I(msg)                ((msg) & 0xFF)                            // message index
+```
+
+The low byte of a `msgid` is the **message index within the owning module's enum**, not the
+source task. Message IDs are globally unique by *defining module* and carry no information
+about `dest` or `src`.
+
+Both candidate invariants are refuted by a message we know was handled **correctly** -
+`CUSTS1_VAL_WRITE_IND`, logged from the device by `diag_observe()`:
+
+```
+msgid=0xFD0A  dest=0x0004  src=0x0011  handle=0x0002  length=1  b0=0x07  routed=CMD
+```
+
+* `msgid & 0xFF` = `0x0A` but `src & 0xFF` = `0x11` - differ.
+* `MSG_T(msgid)` = `0xFD` but `dest & 0xFF` = `0x04` - differ.
+
+That message produced the `CMD_CLEAR` snapshot and the clear demonstrably took effect, so it
+is a ground-truth *valid* message, and it satisfies neither proposed rule.
+
+**Conclusion: the crash-site header cannot be validated or invalidated from its own fields.**
+An earlier revision of this document read `msgid=0x0101` as "a self-consistent LLC message"
+because `MSG_T(msgid) == dest & 0xFF` happened to hold for it. That was equally unfounded -
+see above. Both readings are unsupported, and the header alone does not discriminate between
+"a genuine mis-routed message" and "a freed block decoded as a header".
+
+The observation that `param_len == 0` and that the block sits in `rwip_heap_msg_ret` remain
+suggestive of the freed-block reading, but they are suggestive, not decisive.
+
+### Why the proposed send-time capture cannot be done
+
+The suggested next step was to extend `diag_observe()` to capture every delivered message
+header at *send* time. That would not work as described:
+
+* `ke_msg_send` (`0x07F1BBE2`) is mask ROM and **not interposable** - verified: the symbol
+  resolves to a ROM address, and nothing in the link can override it.
+* The crashing message faults **inside the dispatch to TASK_APP**, so it never reaches
+  `user_catch_rest_hndl`. `diag_observe()` only sees messages that are successfully
+  delivered, so by construction it can never log the one we care about.
+
+What *is* feasible is capturing the free-list state at high frequency, but the corruption is
+transient (microseconds) and consumed by the very dispatch that faults, so a firmware-side
+poll can only ever observe the already-healthy state - the same dead end as the abandoned
+free-list validator (§2).
+
+### Decision
+
+**Live with it.** The defect is in mask ROM and cannot be patched: the `PATCH_ADDR`
+controller redirects instruction *fetches*, so it cannot rewrite a message *field*, and all
+22 registers read their reset value anyway. Write Without Response plus the per-chunk
+receipt bitmap (§2b) fully avoids the path and produces byte-exact uploads.
+
+Further root-causing is judged low value per unit effort and should only resume if a Renesas
+erratum surfaces or a second board becomes available for A/B testing.
 
 
 ---
