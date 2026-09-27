@@ -207,6 +207,12 @@ void user_eink_cmd_wr_handler(ke_msg_id_t const msgid,
                                  TASK_APP,
                                  custs1_val_ntf_ind_req,
                                  sizeof(rsp));
+            // ke_mem_alloc/ke_msg_alloc do not check their own return, and
+            // custs1_val_ntf_ind_req::value is a flexible array member, so this is the
+            // only place a failed allocation would turn into a write to address 0.
+            if (ntf_req == NULL) {
+                break;
+            }
             ntf_req->conidx      = app_connection_idx;
             ntf_req->notification = true;
             ntf_req->handle      = EINK_CMD_VAL;

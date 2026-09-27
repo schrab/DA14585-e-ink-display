@@ -337,6 +337,28 @@ branched into the register map. It would report "healthy" every time and give fa
 confidence. This is an architectural limit of Cortex-M0 (no DWT watchpoints, no ETM/ITM),
 not a probe limitation.
 
+### Audit of the application's own `ke_msg_send` callers (2026-09-28)
+
+A grep across every translation unit this Makefile actually compiles finds **exactly one**
+`ke_msg_send` call: `firmware/ble/user_eink_app.c`, in command `0x08`. The crashing test
+writes `0x07`, whose handler only memsets the framebuffer, resets two counters and takes a
+diag snapshot — it allocates nothing and lets no pointer escape. **The application's own
+code is therefore exonerated as the rogue caller; the poisoning `ke_msg_send` is in ROM.**
+
+Two things that audit checked and cleared, recorded so nobody re-raises them:
+
+* `KE_MSG_ALLOC_DYN(id, dest, src, param_str, length)` expands to
+  `ke_msg_alloc(..., sizeof(struct param_str) + length)`. `custs1_val_ntf_ind_req::value`
+  is declared `value[__ARRAY_EMPTY]`, and `__ARRAY_EMPTY` expands to *nothing*, so the
+  struct is a flexible array member and `sizeof` covers zero value bytes. Passing
+  `sizeof(rsp)` therefore allocates exactly the right amount. This usage is **correct** —
+  it is easy to misread as a double-count.
+* A failed `ke_mem_alloc` is documented to cause a system reset, and `ke_msg_alloc` has no
+  NULL check of its own (it would fault writing to `0x0`, not `0x50001500`). We have added
+  an explicit NULL guard in the `0x08` path anyway, since that is the only place a failed
+  allocation could become a write to address 0 in our code.
+
+
 **Hardware patch controller: unused.** The DA14585 does implement `PATCH_ADDR0..21_REG` at
 `0x40080020 + 8n` (reset value `0x07F00000`), which redirects instruction fetches from ROM
 to RAM. All 22 registers read their **reset value** — zero active patches. The Dialog
