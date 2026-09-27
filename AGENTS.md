@@ -316,8 +316,12 @@ heap cannot grow further without shrinking the framebuffer.
    Fix: `EINK_DIAG_CRC_OFF` (Makefile), which `make EINK_DIAG=1` now defaults to `1`.
    **Never add blocking work to the GATT write handler** — defer to `app_easy_timer`.
    The older `ke_queue_insert` HardFault (`blx r5` @ `0x07F1BDDA` dispatching through
-   `0x50001500` = `GP_ADC_CTRL_REG`) is **still unexplained**: it was also seen on a
-   diagnostic build, but a stall does not obviously corrupt a handler pointer.
+   `0x50001500` = `GP_ADC_CTRL_REG`) is **still unexplained**. The obvious link — that the
+   CRC stall caused message pile-up which exhausted the small `EINK_DIAG=1` pool and
+   produced the overlapping-block signature — was tested directly and **refuted**: with
+   the stall off, the 1392 B pool streams all 30 KB in one pass; with it on, the failure
+   is the *hang* above, never that HardFault. Resolving it needs a second board for A/B
+   or a Renesas erratum.
    For the record, the withdrawn analyses and dead ends are in
    [`BLE_CRASH_DIAGNOSIS.md`](BLE_CRASH_DIAGNOSIS.md) §2 — do not restart from them.
    Write *without* response remains the transport we ship.

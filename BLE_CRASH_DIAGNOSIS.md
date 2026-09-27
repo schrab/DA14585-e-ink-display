@@ -770,12 +770,54 @@ the CRCs are ever needed again, is to move the pass out of the write handler (de
 ### Scope of this result — read before closing the bug
 
 * This explains the **`EINK_DIAG=1` hang**, fully and with a single-variable experiment.
-* It does **not** explain the older `ke_queue_insert` HardFault at `0x07F1BDDA`. That was
-  also observed on a diagnostic build, so the two may share a precondition, but a
-  multi-millisecond stall does not obviously produce a corrupted handler pointer, and
-  nothing here proves it. That fault remains **unexplained**.
+* It does **not** explain the older `ke_queue_insert` HardFault at `0x07F1BDDA`. See
+  *Is the HardFault a second manifestation of the CRC stall?* below — that link was
+  tested directly and **refuted**. That fault remains **unexplained**.
 * It also does not implicate the ROM. Every mask-ROM theory in this section was written
   while the real cause was sitting in our own `user_eink_diag.c`.
+
+### Is the HardFault a second manifestation of the CRC stall?
+
+Plausible chain, and worth testing rather than arguing: the ~tens-of-ms stall holds the
+write handler so a dispatched message cannot be freed; further ATT writes queue up behind
+it; on the `EINK_DIAG=1` pool (1392 B, ~5 slots at 250 B/msg) that exhausts the pool; the
+allocator then hands out overlapping blocks; the ROM dereferences one as a handler
+pointer → the `ke_queue_insert` HardFault. If true, the CRC fix closed the precondition
+for both failure modes at once.
+
+**Tested, and it does not hold.** Both runs on `EINK_DIAG=1` with the **small 1392 B msg
+pool** in both cases; the only difference is the CRC stall:
+
+| CRC stall | What was run | Result |
+|---|---|---|
+| **off** | full 125-chunk / 30,000 B stream | **OK, one pass, 125/125, no fault** (`IPSR=0`, `CFSR=0`) |
+| **on** | first command write | **`0x0E`, board wedged** — `PC=0x07FC1E5C`, `LR=0xFFFFFFF9`, `IPSR=0` |
+
+Two things follow, and they cut against the chain:
+
+1. **The stall does not produce the HardFault.** With the stall present and the small
+   pool, the observed failure is the *hang* — identical signature to §2 — not a
+   HardFault. The `ke_queue_insert` fault never appeared in either run.
+2. **The premise of step 3 is false.** Without the stall, the 1392 B pool streams all
+   30,000 bytes in a single pass with no exhaustion. So the small pool is not the
+   binding constraint during streaming; the stall is. Pool pressure was a *consequence*
+   of the stall in the original observation, not an independent cause to be re-triggered.
+
+The `src_id = 0xFF` (`TASK_ID_INVALID`) detail remains suggestive of a freed block decoded
+as a header, but nothing here corroborates it.
+
+**Status: the `ke_queue_insert` HardFault is still unexplained, and this was the most
+promising available route to it.** What would actually be needed is a second board to A/B
+a suspected silicon erratum, or a Renesas erratum listing — see below.
+
+**An unresolved thread worth noting, not claiming:** §1's "KE message heap starvation"
+(1392 B exhausted, allocator returned overlapping blocks, watchdog reset) was fixed by
+raising the pool to 1904 B. Test A shows the same 1392 B pool now streams 30 KB cleanly
+with no stall. That is consistent with §1 also having been a manifestation of the CRC
+stall — the 1904 B pool simply absorbed the pile-up the stall created. It is *consistent
+with*, not *demonstrated*; separating them would need a build with the stall enabled and
+the pool at 1392 B, which is exactly Test B, and Test B hung before streaming rather than
+overflowing. So this cannot be settled with the hardware currently attached.
 
 
 
