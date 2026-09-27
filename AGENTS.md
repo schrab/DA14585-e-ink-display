@@ -304,23 +304,22 @@ heap cannot grow further without shrinking the framebuffer.
    then reset the board. Fixed by `#define MSG_HEAP_SZ (1904)` in `user_config.h`.
    **Do not reduce this value.**
 
-2. **OPEN — HardFault on any ATT Write Request.** Write *with* response (`response=True`)
+1. **OPEN — HardFault on any ATT Write Request.** Write *with* response (`response=True`)
    faults in the ROM's `ke_queue_insert` (`blx r5` @ `0x07F1BDDA`, LR `0x07F1BDDD`), which
-   dispatches a garbage handler `0x50001500` = `GP_ADC_CTRL_REG`. Write *without* response
-   works. **Use Write Without Response.**
+   dispatches a garbage handler `0x50001500` = `GP_ADC_CTRL_REG`. Root cause is
+   **undetermined, and parked**: whether the crash-site header (`msgid=0x0101`, `dest=1`,
+   `src=0xFF`) is an emitted message or a freed block decoded as a header cannot be decided
+   from its own fields — msgid bytes identify the defining module and enum index, not dest/src,
+   so there is no consistency relation to check. Two readings have been written and retracted
+   on exactly this mistake (the second time, the *retraction* cited a `KE_MSG_ID` macro that
+   does not exist). Do not restart the investigation from either framing, and do not propose
+   send-time logging or a free-list poll: both are recorded as dead ends in
+   [`BLE_CRASH_DIAGNOSIS.md`](BLE_CRASH_DIAGNOSIS.md) §2. Write *without* response works.
+   **Use Write Without Response until this is fixed; do not attempt a ROM patch** (the
+   `PATCH_ADDR` controller redirects instruction fetches, not message fields, and all 22
+   registers measure their reset value).
 
-   This is **not root-caused**, and two earlier readings of the crash record were both
-   withdrawn as unfounded. Do not restart from either framing:
-   * ~~"the crash message is a self-consistent LLC message"~~ — refuted. `msgid` bytes encode
-     the *defining module* and message index, not `dest`/`src`, so the header can be neither
-     validated nor invalidated from its own fields.
-   * ~~"`atts_write_rsp_send` passes an uninitialised `r0`"~~ — refuted. `r0` is that
-     function's first argument, and the function has no callers at all (likely dead ROM code).
-
-   The mask ROM cannot be patched: `PATCH_ADDR` redirects instruction *fetches*, not message
-   fields, and all 22 registers read their reset value. See `BLE_CRASH_DIAGNOSIS.md` §2.
-
-3. **FIXED — silent chunk loss.** Write Commands have no link-layer retransmission, so the
+2. **FIXED — silent chunk loss.** Write Commands have no link-layer retransmission, so the
    host outruns the peripheral and chunks are dropped. This is a **contiguous band, not
    just the tail**, so a byte counter cannot detect it. `user_eink_app.h` now defines a
    240-byte wire chunk (`EINK_CHUNK_SIZE`, 125 chunks); `eink_chunk_map[16]` records

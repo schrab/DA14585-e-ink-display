@@ -4,8 +4,9 @@ This document is the complete guide for continuing development, compilation, fla
 
 > **Read [`BLE_CRASH_DIAGNOSIS.md`](BLE_CRASH_DIAGNOSIS.md) before changing the build, the
 > KE heap sizes, or the BLE transport.** It documents a fixed KE-message-heap starvation
-> bug, an **unresolved** HardFault on any ATT Write Request (with two withdrawn analyses
-> recorded, so the dead ends are not repeated), and the environment gotchas in §3 below.
+> bug, an *open* HardFault on any ATT Write Request (root cause narrowed to allocator
+> state, not an ATT call site — see §2's second-revision note before investigating), and
+> the environment gotchas listed in §3 below.
 
 ---
 
@@ -178,6 +179,21 @@ ROM's `ke_queue_insert`. A **Write Command** (`response=False`) works. Use
 ```bash
 ./venv/bin/python upload_noresp.py --image test_pattern_red_400x300.png
 ```
+
+The crash is **not patched and will not be patchable**: it lives in mask ROM, the hardware
+`PATCH_ADDR` controller redirects instruction fetches (not message fields) and reads all-
+reset values, and the Write-Without-Response path avoids the fault structurally rather
+than working around it. Root cause is **open and parked as undetermined**. The crash-site
+message header can be neither validated nor invalidated from its own fields: KE msgids encode
+the defining module plus an index within its enum and carry no dest/src information, so the
+`KE_MSG_ID` consistency check this section previously pointed at **does not exist in the SDK**
+— it was cited without ever opening `ke_msg.h`, and the resulting "it must be a freed block"
+conclusion is withdrawn along with the earlier "it must be a valid LLC message" one. Read
+[`BLE_CRASH_DIAGNOSIS.md`](BLE_CRASH_DIAGNOSIS.md) §2 before starting new investigation: it
+lists the three experiments already ruled out (instrumenting `ke_msg_send` — ROM, not
+interposable; logging via `user_catch_rest_hndl` — never sees the faulting message; polling
+the free list — corruption is consumed by the faulting dispatch) and what would actually be
+needed to resume (a second board for A/B, or a Renesas erratum).
 
 The client is self-verifying: the firmware keeps a per-chunk receipt bitmap
 (`eink_chunk_map[16]`, one bit per 240-byte chunk) and command `0x08` notifies it, so
