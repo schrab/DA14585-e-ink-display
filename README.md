@@ -178,40 +178,50 @@ python ble_eink_client.py --image test_pattern_400x300.png
 
 ## 8. Custom Firmware Development & Standalone Flashing
 
-You can build and deploy your own bare-metal C applications using the GNU Arm Embedded Toolchain (`arm-none-eabi-gcc`) and program them directly to the FM25Q04 SPI NOR flash via ST-Link V2.
+You can build and deploy your own bare-metal C applications with full BLE peripheral stack using the GNU Arm Embedded Toolchain (`arm-none-eabi-gcc`) and program them directly to the FM25Q04 SPI NOR flash via ST-Link V2.
+
+> [!TIP]
+> **Switching to a Linux machine?** See [`HANDOFF.md`](HANDOFF.md) for a complete setup guide covering Linux packages, udev rules, SDK paths, and commands.
 
 ### Prerequisites
 * **Arm GNU Toolchain**: `arm-none-eabi-gcc` 10.x / 14.x
 * **Build System**: GNU Make
 * **Python Dependencies**: `pip install pyocd Pillow bleak`
-* **DA145xx SDK**: SDK 6.0.x (e.g. `DA145xx_SDK/6.0.24.1464` or SDK headers included in repo)
+* **DA145xx SDK**: Renesas / Dialog DA145xx SDK 6.0.24.1464 (or 6.0.22.1401)
 
-### 1. Build Custom Firmware
+### 1. Build Custom BLE Firmware
 ```bash
 cd firmware
-make all
+make SDK_PATH=/path/to/DA145xx_SDK/6.0.24.1464 all
 ```
-* Compiles `main.c`, `user_periph_setup.c`, `ssd1619.c`, and Dialog system initialization files.
-* Links using [`ldscript_da14585.ld`](firmware/ldscript_da14585.ld) directly into SysRAM1 (`0x07FC0000`).
-* Generates `build/eink_firmware.bin` and packages it into `build/eink_firmware.img` with a 64-byte Dialog Image Header via [`mkimage.py`](firmware/mkimage.py).
+* Compiles SDK BLE stack (`rwip`, `ke`, `gapc`, `gapm`, profiles), custom GATT service (`custs1`), E-Ink application callbacks (`user_eink_app.c`), and display driver (`ssd1619.c`).
+* Links using [`firmware/ldscript_ble.lds.S`](firmware/ldscript_ble.lds.S) with a 2 KB dedicated stack (`__StackTop = 0x07FCF700`).
+* Generates `build/eink_ble_firmware.bin` (~29.8 KB) and packages it into `build/eink_ble_firmware.img` with a 64-byte Dialog Image Header (`s_imageHeader`, imageid=3) via [`mkimage.py`](firmware/mkimage.py).
 
 ### 2. Flash Directly to SPI NOR Flash via ST-Link V2
 ```bash
-make flash
+make SDK_PATH=/path/to/DA145xx_SDK/6.0.24.1464 flash
 ```
 Or run the flasher directly from the root directory:
 ```bash
-python flash_spi_firmware.py write firmware/build/eink_firmware.img --addr 0x004000 --reset
+python flash_spi_firmware.py write firmware/build/eink_ble_firmware.img --addr 0x004000 --reset
 ```
 * **No Segger J-Link or proprietary tools required!**
 * Automatically wakes the FM25Q04 NOR flash from deep sleep (`0xAB`).
 * Erases required 4 KB sectors and programs 256-byte pages via an injected 1,008-byte Thumb-1 RAM stub ([`flash_raw.bin`](flash_raw.bin)).
-* Verifies written data bit-by-bit against the local image.
-* Issues software reset: the chip boots via the secondary bootloader, loads the new image, renders to the e-ink screen, and begins its low-power heartbeat loop.
+* Verifies written data bit-by-bit against the local image (100% bit-exact).
+* Issues software reset: the chip boots via the Dialog secondary bootloader, copies Image 1 into SysRAM1, sets remap address 2, and runs the custom BLE firmware.
+* The board boots, signals initialization with double-blink on the status LED, and begins advertising as `EINK-V115-42000`.
 
-### 3. Test In-RAM Execution via SWD (Optional)
-To test custom code instantly in SysRAM without writing to flash:
+### 3. Wirelessly Upload Images over BLE
 ```bash
-python test_ram_boot.py
+python ble_eink_client.py --image test_pattern_red_400x300.png
 ```
+* Scans and connects to the display board over BLE (MTU 247).
+* Sends Command `0x07` (clear buffer).
+* Streams 30,000 bytes (dual-plane BW + Red) in 125 offset-tagged chunks at ~7.6 KB/s in ~3.8 seconds.
+* Sends Command `0x06` (refresh trigger).
+* Display driver executes 17-second physical refresh and powers down the high-voltage boost PMIC.
+* Image is retained permanently with 0.00 &mu;A power draw!
+
 

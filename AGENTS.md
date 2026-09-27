@@ -261,6 +261,19 @@ The firmware uses an efficient multiplexing scheme where SPI lines are shared be
 | - Successfully programmed & verified permanent boot from flash        |
 | - Board boots standalone into custom firmware on hardware reset       |
 +-----------------------------------------------------------------------+
+                                  |
+                                  v
++-----------------------------------------------------------------------+
+| PHASE 7: Custom BLE Peripheral Stack & OTA Image Streaming (COMPLETED)|
+| - Integrated full Renesas/Dialog DA145xx SDK BLE stack (rwip/ke/gapc) |
+| - Resolved linker script stack bug: allocated 2KB stack (ldscript_ble)|
+| - Implemented custom 128-bit GATT service (afdbecdd-...) & chars     |
+| - Fixed disconnect assertion (user_app_adv_undirect_complete status)  |
+| - Added deferred refresh timer (app_easy_timer 100ms) for GATT ACK    |
+| - In-silicon verified wireless 30KB dual-plane image transmission     |
+| - Board boots, advertises as EINK-V115-42000, receives tri-color      |
+|   graphics over BLE, and renders flawlessly to physical E-Ink display!|
++-----------------------------------------------------------------------+
 ```
 
 ---
@@ -314,21 +327,19 @@ The firmware uses an efficient multiplexing scheme where SPI lines are shared be
 
 ## 10. Tooling Reference
 
+* [`HANDOFF.md`](file:///C:/Users/schra/Developer/DA14585-eink-display/HANDOFF.md): Comprehensive developer guide for setting up, building, flashing, and running BLE image uploads on a Linux machine with the original DA145xx SDK.
+* [`firmware/ble/`](file:///C:/Users/schra/Developer/DA14585-eink-display/firmware/ble/): Custom BLE peripheral application source code (`user_eink_app.c`, `user_custs1_def.c`, `user_custs_config.c`, configuration headers).
+* [`firmware/ldscript_ble.lds.S`](file:///C:/Users/schra/Developer/DA14585-eink-display/firmware/ldscript_ble.lds.S): Custom linker script preprocessor template fixing zero-size stack bug with 2 KB dedicated stack allocation at `0x07FCF700`.
+* [`firmware/Makefile`](file:///C:/Users/schra/Developer/DA14585-eink-display/firmware/Makefile): Automated cross-platform build pipeline (Linux + Windows) for compiling SDK BLE stack and flashing (`make all`, `make flash`, `make clean`).
+* [`firmware/mkimage.py`](file:///C:/Users/schra/Developer/DA14585-eink-display/firmware/mkimage.py): Standalone Python packager that creates 64-byte Dialog Image Headers with bit-exact CRC-32 calculation.
+* [`ble_eink_client.py`](file:///C:/Users/schra/Developer/DA14585-eink-display/ble_eink_client.py): Python Bleak-based wireless image transmitter supporting 30,000-byte tri-color streaming at ~7.6 KB/s and display refresh triggers.
 * [`flash_spi_firmware.py`](file:///C:/Users/schra/Developer/DA14585-eink-display/flash_spi_firmware.py): Standalone open-source SPI NOR flash programmer using ST-Link V2 (SWD). Includes embedded 1,008-byte Thumb-1 flasher stub (`flash_raw.bin`), sector erase, page write, read, verify, and software reset.
 * [`flash_raw.c`](file:///C:/Users/schra/Developer/DA14585-eink-display/flash_raw.c) / [`flash_raw.bin`](file:///C:/Users/schra/Developer/DA14585-eink-display/flash_raw.bin): Pure standalone C Cortex-M0 RAM stub for bit-banged SPI NOR flash communication with automatic PMU wake, flash sleep exit (`0xAB`), and watchdog reload.
-* [`firmware/Makefile`](file:///C:/Users/schra/Developer/DA14585-eink-display/firmware/Makefile): Automated build pipeline for custom DA14585 C applications (`make all`, `make flash`, `make clean`).
-* [`firmware/ldscript_da14585.ld`](file:///C:/Users/schra/Developer/DA14585-eink-display/firmware/ldscript_da14585.ld): GNU ld linker script targeting DA14585 SysRAM1 with correct CMSIS zero-table byte alignment.
-* [`firmware/mkimage.py`](file:///C:/Users/schra/Developer/DA14585-eink-display/firmware/mkimage.py): Standalone Python packager that creates 64-byte Dialog Image Headers with bit-exact CRC-32 calculation.
-* [`test_ram_boot.py`](file:///C:/Users/schra/Developer/DA14585-eink-display/test_ram_boot.py): Direct SWD SysRAM firmware boot and diagnostic runner.
-* [`da14585_probe.py`](file:///C:/Users/schra/Developer/DA14585-eink-display/da14585_probe.py): Hardware connection, register dump, and vector table decoder.
-* [`dump_spi_flash.py`](file:///C:/Users/schra/Developer/DA14585-eink-display/dump_spi_flash.py): SWD RAM-injected high-speed SPI NOR flash dumper.
-* [`extract_partitions.py`](file:///C:/Users/schra/Developer/DA14585-eink-display/extract_partitions.py): Flash partition carver for bootloader, dual app images, and NVDS.
+* [`check_target_now.py`](file:///C:/Users/schra/Developer/DA14585-eink-display/check_target_now.py): Real-time core state, PC, register, and GPIO inspector.
+* [`ssd1619.h`](file:///C:/Users/schra/Developer/DA14585-eink-display/ssd1619.h) / [`ssd1619.c`](file:///C:/Users/schra/Developer/DA14585-eink-display/ssd1619.c): Standalone C driver for SSD1619 / SSD1683 displays with monochrome & tri-color API.
 * [`display_image.py`](file:///C:/Users/schra/Developer/DA14585-eink-display/display_image.py): Universal image pipeline converting PNG/BMP graphics into dual-buffer tri-color e-ink framebuffers and flashing to hardware.
 * [`test_eink_red.py`](file:///C:/Users/schra/Developer/DA14585-eink-display/test_eink_red.py): Injects dual-buffer tri-color graphics into SysRAM and drives physical 3-color panel refresh.
 * [`generate_red_test_image.py`](file:///C:/Users/schra/Developer/DA14585-eink-display/generate_red_test_image.py): Generates 400x300 tri-color test image and splits into dual 15,000-byte BW and Red buffers.
-* [`test_eink_hardware.py`](file:///C:/Users/schra/Developer/DA14585-eink-display/test_eink_hardware.py): In-silicon monochrome test driver with active watchdog-fed retention.
-* [`generate_test_image.py`](file:///C:/Users/schra/Developer/DA14585-eink-display/generate_test_image.py): Generates 400x300 monochrome test pattern and 15,000-byte raw framebuffer.
-* [`check_target_now.py`](file:///C:/Users/schra/Developer/DA14585-eink-display/check_target_now.py): Real-time core state, PC, register, and GPIO inspector.
-* [`ssd1619.h`](file:///C:/Users/schra/Developer/DA14585-eink-display/ssd1619.h) / [`ssd1619.c`](file:///C:/Users/schra/Developer/DA14585-eink-display/ssd1619.c): Standalone C driver for SSD1619 / SSD1683 displays with monochrome & tri-color API.
-* [`ble_eink_client.py`](file:///C:/Users/schra/Developer/DA14585-eink-display/ble_eink_client.py): Python Bleak-based OTA image transmitter for stock BLE firmware.
+* [`dump_spi_flash.py`](file:///C:/Users/schra/Developer/DA14585-eink-display/dump_spi_flash.py): SWD RAM-injected high-speed SPI NOR flash dumper.
+* [`extract_partitions.py`](file:///C:/Users/schra/Developer/DA14585-eink-display/extract_partitions.py): Flash partition carver for bootloader, dual app images, and NVDS.
 

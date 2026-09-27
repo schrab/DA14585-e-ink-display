@@ -47,4 +47,9 @@
 
 void periph_init(void);
 
+#if DEVELOPMENT_DEBUG
+void GPIO_reservations(void);
+#endif
+
 #endif // _USER_PERIPH_SETUP_H_
+

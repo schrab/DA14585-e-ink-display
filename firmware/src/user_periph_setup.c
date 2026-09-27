@@ -10,9 +10,25 @@
 #include "gpio.h"
 #include "syscntl.h"
 
+#if DEVELOPMENT_DEBUG
+void GPIO_reservations(void)
+{
+    RESERVE_GPIO(STATUS_LED, STATUS_LED_PORT, STATUS_LED_PIN, PID_GPIO);
+    RESERVE_GPIO(FLASH_CS, FLASH_CS_PORT, FLASH_CS_PIN, PID_GPIO);
+    RESERVE_GPIO(EPD_PWR_EN, EPD_PWR_EN_PORT, EPD_PWR_EN_PIN, PID_GPIO);
+    RESERVE_GPIO(EPD_RST, EPD_RST_PORT, EPD_RST_PIN, PID_GPIO);
+    RESERVE_GPIO(EPD_CS, EPD_CS_PORT, EPD_CS_PIN, PID_GPIO);
+    RESERVE_GPIO(EPD_BUSY, EPD_BUSY_PORT, EPD_BUSY_PIN, PID_GPIO);
+    RESERVE_GPIO(EPD_CLK, EPD_CLK_PORT, EPD_CLK_PIN, PID_GPIO);
+    RESERVE_GPIO(EPD_MOSI, EPD_MOSI_PORT, EPD_MOSI_PIN, PID_GPIO);
+    RESERVE_GPIO(EPD_DC, EPD_DC_PORT, EPD_DC_PIN, PID_GPIO);
+}
+#endif
+
 static void set_pad_functions(void)
 {
     // Status LED: Output, start inactive (HIGH / OFF)
+
     GPIO_ConfigurePin(STATUS_LED_PORT, STATUS_LED_PIN, OUTPUT, PID_GPIO, true);
 
     // Flash CS: Output, inactive (HIGH) to avoid bus contention with E-Ink
@@ -36,32 +52,8 @@ static void set_pad_functions(void)
     GPIO_ConfigurePin(EPD_DC_PORT, EPD_DC_PIN, OUTPUT, PID_GPIO, false);
 }
 
-uint32_t SystemCoreClock = 16000000UL;
-
-void SystemCoreClockUpdate(void)
-{
-    SystemCoreClock = 16000000UL;
-}
-
-void SystemInit(void)
-{
-    // Ensure all interrupts are disabled globally during startup
-    __disable_irq();
-
-    // Disable all NVIC interrupts (0..31)
-    NVIC->ICER[0] = 0xFFFFFFFF;
-
-    // Clear all NVIC pending interrupts
-    NVIC->ICPR[0] = 0xFFFFFFFF;
-
-    // Stop Timer 0
-    SetWord16(TIMER0_CTRL_REG, 0x6);
-
-    // Set AMBA clock to 16 MHz
-    SetWord16(CLK_AMBA_REG, 0x00);
-}
-
 void periph_init(void)
+
 {
     // Power up peripheral domain
     SetBits16(PMU_CTRL_REG, PERIPH_SLEEP, 0);
