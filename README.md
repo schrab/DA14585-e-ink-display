@@ -1,5 +1,10 @@
 # DA14585 4.2" Smart E-Ink Display Reverse-Engineering & Driver Suite
 
+> *"What a pain to develop for the DA14585 SoC."*
+>
+> — **Aaron Christophel (@Atc1441)**
+> 
+
 Complete reverse-engineering documentation, bare-metal C drivers, Python hardware test suites, and BLE transmitters for the Dialog Semiconductor (Renesas) **DA14585** Bluetooth Low Energy 4.2-inch Electronic Paper Display (EPD).
 
 ![Tri-Color Test Pattern](test_pattern_red_400x300.png)
