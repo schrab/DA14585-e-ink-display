@@ -1,0 +1,40 @@
+# Python dependencies for the host-side tooling.
+#
+#   python -m venv venv
+#   ./venv/bin/pip install -r requirements.txt
+#
+# Pinned to what the verified toolchain ran on. The toolchain itself is NOT in pip:
+# it needs the GNU Arm Embedded toolchain plus the Renesas/Dialog SDK, both of which
+# are installed outside pip. See HANDOFF.md for their paths and the `make` invocation.
+
+# --- Direct dependencies -------------------------------------------------------
+
+# BLE transport: scan, connect, and push GATT writes (upload_noresp.py,
+# ble_eink_client.py, stepzero_write_req.py, repro_disconnect.py).
+bleak==3.0.2
+
+# SWD access over ST-Link: flashing, core-state inspection, retained-RAM reads
+# (reboot_target.py, check_target_now.py, ke_rom_dump.py, flash_spi_firmware.py).
+pyocd==0.45.1
+
+# Image loading and the 400x300 rescale (ble_eink_client.py, dither_convert.py).
+pillow==12.3.0
+
+# Array maths for the halftone/error-diffusion palette matching in
+# dither_convert.py. Added 2026-09-28; upload_noresp.py imports it transitively, so a
+# venv without it fails at import rather than at first use.
+numpy==2.5.3
+
+# --- Notes on what is deliberately absent ---------------------------------------
+#
+# capstone, intelhex, pyelftools and pylink-square are pinned by pyocd and are
+# installed automatically as its dependencies; rom_callers.py uses capstone directly
+# and inherits it from the same resolution.
+#
+# dbus-fast is a hard requirement of bleak on Linux (it talks to BlueZ over D-Bus).
+# It comes in via bleak, but is called out here because its absence is the single most
+# common cause of a headless upload failing with an opaque backend error.
+#
+# The Ghidra/PyGhidra stack (jpype1, pyghidra) is NOT listed: ghidra_rom.py needs a
+# local Ghidra install and JRE, which pip cannot supply. It is a separate, optional
+# analysis path -- see BLE_CRASH_DIAGNOSIS.md.
